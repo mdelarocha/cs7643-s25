@@ -1,0 +1,5 @@
+2025-04-23 17:22:07,494 - __main__ - INFO - Starting OASIS dataset download
+2025-04-23 17:22:07,494 - src.utils.download - INFO - Metadata file already exists at data/oasis-cross-sectional.csv
+2025-04-23 17:22:07,494 - src.utils.download - INFO - Metadata file already exists at data/oasis-cross-sectional.csv
+2025-04-23 17:22:08,450 - src.utils.gcs_utils - INFO - Successfully authenticated with GCS
+2025-04-23 17:22:08,451 - src.utils.download - INFO - Listing contents of bucket 'oasis-1-dataset-13635'...

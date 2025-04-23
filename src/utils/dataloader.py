@@ -23,6 +23,12 @@ def load_oasis_metadata(metadata_path):
     try:
         metadata = pd.read_csv(metadata_path)
         logger.info(f"Loaded metadata from {metadata_path} with {len(metadata)} entries")
+        
+        # Standardize column names - handle different variations of subject ID column
+        if 'ID' in metadata.columns and 'Subject ID' not in metadata.columns:
+            metadata = metadata.rename(columns={'ID': 'Subject ID'})
+            logger.info("Renamed 'ID' column to 'Subject ID'")
+        
         return metadata
     except Exception as e:
         logger.error(f"Error loading metadata from {metadata_path}: {str(e)}")
@@ -79,28 +85,94 @@ def create_dataset_from_metadata(metadata_df, data_dir, preprocess=True, normali
     
     for _, row in metadata_df.iterrows():
         try:
-            # Construct file path - adjust based on your metadata structure
+            # Get subject ID
             subject_id = row.get('Subject ID')
-            visit = row.get('Visit')
-            filename = row.get('MRI_file', f"{subject_id}_{visit}.nii.gz")
-            
-            file_path = os.path.join(data_dir, filename)
-            
-            # Load and preprocess the MRI volume
-            volume = preprocess_mri_file(file_path, normalize=normalize, extract_core=extract_core)
-            
-            if volume is not None:
-                X.append(volume)
+            if subject_id is None:
+                logger.warning(f"Row missing 'Subject ID': {row}")
+                continue
                 
-                # Get the label - adjust based on your task (classification, regression, etc.)
-                label = row.get('CDR', 0)  # Clinical Dementia Rating
-                y.append(label)
+            # Get CDR score (label)
+            cdr_score = row.get('CDR', None)
+            if cdr_score is None or pd.isna(cdr_score):
+                logger.debug(f"Skipping subject {subject_id} with missing CDR score")
+                continue
+            
+            # Look for MRI files in subject directory
+            subject_dir = os.path.join(data_dir, subject_id)
+            
+            # If subject directory exists
+            if os.path.isdir(subject_dir):
+                # Find masked MRI files (*.img files)
+                mri_files = []
+                for root, _, files in os.walk(subject_dir):
+                    for file in files:
+                        if file.endswith('.img') and ('masked' in file or 'fseg' in file):
+                            mri_files.append(os.path.join(root, file))
+                
+                if not mri_files:
+                    logger.warning(f"No masked MRI files found for subject {subject_id}")
+                    continue
+                
+                # Use the first MRI file found
+                file_path = mri_files[0]
+                
+                # Load and preprocess the MRI volume
+                volume = preprocess_mri_file(file_path, normalize=normalize, extract_core=extract_core)
+                
+                if volume is not None:
+                    X.append(volume)
+                    y.append(cdr_score)
+            else:
+                logger.warning(f"Subject directory not found: {subject_dir}")
         
         except Exception as e:
             logger.error(f"Error processing entry for subject {subject_id}: {str(e)}")
     
-    logger.info(f"Created dataset with {len(X)} samples and {len(y)} labels")
-    return np.array(X), np.array(y)
+    if X and y:
+        logger.info(f"Created dataset with {len(X)} samples and {len(y)} labels")
+        
+        # Convert labels to proper format for classification
+        try:
+            # Convert labels to numeric values if they are not already
+            y_array = np.array(y)
+            
+            # Check if labels are numeric or strings
+            if isinstance(y_array[0], (str, np.str_)):
+                logger.info(f"Converting string labels to numeric values: {np.unique(y_array)}")
+                # Use a mapping for string labels (e.g., 'Positive', 'Negative')
+                label_map = {label: i for i, label in enumerate(np.unique(y_array))}
+                y_numeric = np.array([label_map[label] for label in y_array])
+                logger.info(f"Mapped labels: {label_map}")
+            else:
+                # If numeric, ensure they're floats for regression or integers for classification
+                if np.issubdtype(y_array.dtype, np.floating):
+                    # For CDR scores, round to common values (0, 0.5, 1, etc.)
+                    # For classification, convert to integers
+                    # Get unique values to determine if classification or regression
+                    unique_vals = np.unique(y_array)
+                    logger.info(f"Found unique label values: {unique_vals}")
+                    
+                    if len(unique_vals) <= 5:  # Likely classification with few classes
+                        # Map CDR scores to integer classes (e.g., 0->0, 0.5->1, 1->2, etc.)
+                        label_map = {float(val): i for i, val in enumerate(sorted(unique_vals))}
+                        y_numeric = np.array([label_map[float(val)] for val in y_array])
+                        logger.info(f"Mapped numeric labels to integers: {label_map}")
+                    else:
+                        # Keep as is for regression
+                        y_numeric = y_array
+                else:
+                    # Already integers, keep as is
+                    y_numeric = y_array
+            
+            logger.info(f"Final label format: {y_numeric.dtype}, shape: {y_numeric.shape}, unique values: {np.unique(y_numeric)}")
+            return np.array(X), y_numeric
+        except Exception as e:
+            logger.error(f"Error converting labels: {str(e)}")
+            # Return original format if conversion fails
+            return np.array(X), np.array(y)
+    else:
+        logger.warning("No valid samples found in dataset")
+        return np.array([]), np.array([])
 
 def create_2d_slice_dataset(volumes, labels=None, axis=2):
     """
