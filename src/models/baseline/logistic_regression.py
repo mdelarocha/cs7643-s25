@@ -7,172 +7,256 @@ import pandas as pd
 import logging
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, 
+    classification_report, confusion_matrix, roc_auc_score, log_loss
+)
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
+import joblib # Use joblib for potentially more robust serialization than pickle
+from typing import Optional, Tuple, Dict, Any, List
+
+from ..base_model import BaseModel # Import the base class
 
 logger = logging.getLogger(__name__)
 
-def train_logistic_regression(X_train, y_train, C=1.0, penalty='l2', class_weight=None, max_iter=1000, solver='liblinear', random_state=42):
-    """
-    Train a logistic regression model with specified parameters.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        C (float, optional): Inverse of regularization strength.
-        penalty (str, optional): Regularization type ('l1', 'l2', 'elasticnet', or 'none').
-        class_weight (dict or str, optional): Class weights.
-        max_iter (int, optional): Maximum number of iterations.
-        solver (str, optional): Algorithm to use.
-        random_state (int, optional): Random seed.
-        
-    Returns:
-        LogisticRegression: Trained model.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot train model with None inputs")
-        return None
-    
-    try:
-        # Initialize and train model
-        model = LogisticRegression(
-            C=C,
-            penalty=penalty,
-            class_weight=class_weight,
-            max_iter=max_iter,
-            solver=solver,
-            random_state=random_state
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Log model information
-        train_accuracy = model.score(X_train, y_train)
-        logger.info(f"Trained logistic regression model (C={C}, penalty={penalty})")
-        logger.info(f"Training accuracy: {train_accuracy:.4f}")
-        
-        return model
-    
-    except Exception as e:
-        logger.error(f"Error training logistic regression model: {str(e)}")
-        return None
+# --- Helper function for scaling (could be moved to a common utils if shared) ---
+# Keep it here for now as it might be model-specific if different scalers are used
+def _standardize_features(X_train: np.ndarray, X_val: Optional[np.ndarray] = None, X_test: Optional[np.ndarray] = None) \
+                         -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], StandardScaler]:
+    """Standardize features using StandardScaler. Fits on train, transforms train, val, test."""
+    scaler = StandardScaler()
+    X_train_std = scaler.fit_transform(X_train)
+    logger.info(f"Scaled training data. Original mean: {np.mean(X_train):.3f}, std: {np.std(X_train):.3f}. Scaled mean: {np.mean(X_train_std):.3f}, std: {np.std(X_train_std):.3f}")
+    X_val_std = scaler.transform(X_val) if X_val is not None else None
+    if X_val_std is not None: logger.debug("Scaled validation data.")
+    X_test_std = scaler.transform(X_test) if X_test is not None else None
+    if X_test_std is not None: logger.debug("Scaled test data.")
+    return X_train_std, X_val_std, X_test_std, scaler
 
-def hyperparameter_tuning(X_train, y_train, X_val=None, y_val=None, cv=5, scoring='accuracy', random_state=42):
-    """
-    Perform hyperparameter tuning for logistic regression.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        X_val (numpy.ndarray, optional): Validation features.
-        y_val (numpy.ndarray, optional): Validation labels.
-        cv (int, optional): Number of cross-validation folds.
-        scoring (str, optional): Scoring metric.
-        random_state (int, optional): Random seed.
+# --- Logistic Regression Model Class ---
+class LogisticRegressionModel(BaseModel):
+    """Logistic Regression model implementing the BaseModel interface."""
+
+    @property
+    def needs_scaling(self) -> bool:
+        return True
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, 
+            X_val: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None) -> 'LogisticRegressionModel':
+        """Fit the Logistic Regression model, performing standardization and hyperparameter tuning."""
+        logger.info(f"Fitting LogisticRegression model...")
         
-    Returns:
-        tuple: (best_model, grid_results) - Best model and grid search results.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot tune hyperparameters with None inputs")
-        return None, None
-    
-    try:
-        # Define parameter grid
-        param_grid = {
-            'C': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
-            'penalty': ['l1', 'l2'],
-            'class_weight': [None, 'balanced'],
-            'solver': ['liblinear']  # liblinear supports both l1 and l2
+        # 1. Standardize features
+        try:
+            X_train_std, X_val_std, _, self.scaler = _standardize_features(X_train, X_val) # Fit scaler
+        except Exception as e:
+             logger.exception(f"Error during standardization for Logistic Regression: {e}")
+             raise # Re-raise exception to indicate fit failure
+
+        # 2. Define parameter grid for GridSearchCV
+        # Use model_params passed during init or defaults
+        default_params = {
+            'penalty': ['l2'], # Default to l2, l1 requires solver='liblinear' or 'saga'
+            'C': [0.01, 0.1, 1, 10, 100],
+            'solver': ['liblinear', 'lbfgs'], # lbfgs is common default
+            'max_iter': [100, 200] # Increase max_iter if convergence issues
         }
-        
-        # Initialize grid search
-        grid_search = GridSearchCV(
-            LogisticRegression(random_state=random_state, max_iter=1000),
-            param_grid=param_grid,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=-1
-        )
-        
-        # Fit grid search
-        grid_search.fit(X_train, y_train)
-        
-        # Get best model
-        best_model = grid_search.best_estimator_
-        
-        # Log results
-        logger.info(f"Best parameters: {grid_search.best_params_}")
-        logger.info(f"Best cross-validation {scoring}: {grid_search.best_score_:.4f}")
-        
-        # Evaluate on validation set if provided
-        if X_val is not None and y_val is not None:
-            val_accuracy = best_model.score(X_val, y_val)
-            logger.info(f"Validation accuracy: {val_accuracy:.4f}")
-        
-        return best_model, grid_search.cv_results_
-    
-    except Exception as e:
-        logger.error(f"Error in hyperparameter tuning: {str(e)}")
-        return None, None
+        param_grid = self.model_params.get('param_grid', default_params)
+        cv = self.model_params.get('cv', 5)
+        # Default to f1_weighted for multi-class compatibility, allow override via params
+        scoring = self.model_params.get('scoring', 'f1_weighted') 
 
-def evaluate_model(model, X_test, y_test, feature_names=None):
-    """
-    Evaluate a trained logistic regression model.
-    
-    Args:
-        model (LogisticRegression): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        feature_names (list, optional): Names of features.
+        # 3. Perform GridSearchCV
+        logger.info(f"Performing GridSearchCV for Logistic Regression (CV={cv}, Scoring={scoring}). Grid: {param_grid}")
+        lr = LogisticRegression(random_state=42)
+        grid_search = GridSearchCV(lr, param_grid, cv=cv, scoring=scoring, n_jobs=-1)
         
-    Returns:
-        dict: Dictionary of evaluation metrics.
-    """
-    if model is None or X_test is None or y_test is None:
-        logger.error("Cannot evaluate model with None inputs")
-        return {}
-    
-    try:
-        # Make predictions
-        y_pred = model.predict(X_test)
-        y_pred_proba = model.predict_proba(X_test)[:, 1] if len(model.classes_) == 2 else None
-        
-        # Calculate metrics
-        metrics = {}
-        metrics['accuracy'] = accuracy_score(y_test, y_pred)
-        metrics['classification_report'] = classification_report(y_test, y_pred, output_dict=True)
-        metrics['confusion_matrix'] = confusion_matrix(y_test, y_pred).tolist()
-        
-        # ROC AUC for binary classification
-        if y_pred_proba is not None:
-            metrics['roc_auc'] = roc_auc_score(y_test, y_pred_proba)
-        
-        # Log results
-        logger.info(f"Test accuracy: {metrics['accuracy']:.4f}")
-        if 'roc_auc' in metrics:
-            logger.info(f"ROC AUC: {metrics['roc_auc']:.4f}")
-        
-        # Feature importance (coefficients) for interpretation
-        if feature_names is not None and len(feature_names) == X_test.shape[1]:
-            importance = pd.DataFrame({
-                'feature': feature_names,
-                'coefficient': model.coef_[0]
-            })
-            importance = importance.sort_values('coefficient', key=abs, ascending=False)
-            metrics['feature_importance'] = importance.to_dict('records')
+        try:
+            grid_search.fit(X_train_std, y_train)
+            self.model = grid_search.best_estimator_
+            logger.info(f"GridSearchCV complete. Best Params: {grid_search.best_params_}, Best Score ({scoring}): {grid_search.best_score_:.4f}")
             
-            # Log top features
-            top_features = importance.head(10).to_string(index=False)
-            logger.info(f"Top 10 features by importance:\n{top_features}")
+            # Optional: Evaluate on validation set if provided
+            if X_val_std is not None and y_val is not None:
+                val_preds = self.model.predict(X_val_std)
+                val_acc = accuracy_score(y_val, val_preds)
+                logger.info(f"Validation Accuracy with best model: {val_acc:.4f}")
+                
+        except Exception as e:
+            logger.exception(f"Error during GridSearchCV or validation evaluation for Logistic Regression: {e}")
+            # Decide if fit should fail or continue with a default model
+            # For now, let's try fitting a default model if GridSearch fails
+            logger.warning("GridSearchCV failed. Fitting Logistic Regression with default parameters.")
+            try:
+                 default_lr = LogisticRegression(random_state=42, max_iter=200) # Simple default
+                 default_lr.fit(X_train_std, y_train)
+                 self.model = default_lr
+            except Exception as e_default:
+                 logger.exception(f"Failed to fit even the default Logistic Regression: {e_default}")
+                 raise # Re-raise if default also fails
+
+        if self.model is None:
+             logger.error("Logistic Regression model fitting failed.")
+             raise RuntimeError("Model could not be trained.") # Ensure fit fails clearly
+             
+        return self # Return the instance
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions. Applies scaling using the stored scaler."""
+        if self.model is None:
+            raise RuntimeError("Model has not been trained yet. Call fit() first.")
+        if self.scaler is None:
+             raise RuntimeError("Scaler was not fitted during training. Cannot predict.")
         
-        return metrics
-    
-    except Exception as e:
-        logger.error(f"Error evaluating model: {str(e)}")
-        return {}
+        try:
+            X_std = self.scaler.transform(X)
+            predictions = self.model.predict(X_std)
+            return predictions
+        except Exception as e:
+             logger.exception(f"Error during prediction: {e}")
+             # Depending on requirements, return empty array or re-raise
+             raise
+
+    def predict_proba(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """Predict class probabilities. Applies scaling."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if self.scaler is None: raise RuntimeError("Scaler not fitted.")
+        
+        # Check if the underlying model supports predict_proba
+        if not hasattr(self.model, 'predict_proba'):
+             logger.warning("The fitted Logistic Regression model does not support predict_proba.")
+             return None
+             
+        try:
+            X_std = self.scaler.transform(X)
+            probabilities = self.model.predict_proba(X_std)
+            return probabilities
+        except Exception as e:
+             logger.exception(f"Error during probability prediction: {e}")
+             raise
+
+    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """Evaluate the model. Applies scaling."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if self.scaler is None: raise RuntimeError("Scaler not fitted.")
+
+        logger.info(f"Evaluating LogisticRegression model...")
+        try:
+            # Scale test data
+            X_test_std = self.scaler.transform(X_test)
+            
+            # Get predictions
+            y_pred = self.model.predict(X_test_std)
+            
+            # Get probabilities (handle potential errors or models without predict_proba)
+            y_prob = None
+            if hasattr(self.model, "predict_proba"):
+                try:
+                    y_prob = self.model.predict_proba(X_test_std)[:, 1] # Prob of positive class for AUC
+                except Exception as proba_err:
+                    logger.warning(f"Could not get prediction probabilities: {proba_err}")
+            else:
+                 logger.warning("Model does not support predict_proba.")
+
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            cm = confusion_matrix(y_test, y_pred)
+            report = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
+            
+            metrics = {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'confusion_matrix': cm,
+                'classification_report': report,
+            }
+            
+            # Add AUC if probabilities are available and it's a binary classification
+            num_classes = len(np.unique(y_test))
+            if y_prob is not None and num_classes == 2:
+                try:
+                     roc_auc = roc_auc_score(y_test, y_prob)
+                     metrics['roc_auc'] = roc_auc
+                     # Calculate log loss as well
+                     logloss = log_loss(y_test, y_prob)
+                     metrics['log_loss'] = logloss
+                except ValueError as auc_err:
+                     logger.warning(f"Could not calculate ROC AUC or LogLoss: {auc_err}") 
+            elif num_classes > 2:
+                # Handle multi-class AUC if needed (requires predict_proba for all classes)
+                 try:
+                     y_prob_all = self.model.predict_proba(X_test_std)
+                     if y_prob_all.shape[1] == num_classes:
+                          roc_auc_ovr = roc_auc_score(y_test, y_prob_all, multi_class='ovr', average='weighted')
+                          metrics['roc_auc_ovr'] = roc_auc_ovr
+                          logloss = log_loss(y_test, y_prob_all)
+                          metrics['log_loss'] = logloss
+                 except Exception as mc_auc_err:
+                      logger.warning(f"Could not calculate multi-class ROC AUC/LogLoss: {mc_auc_err}")
+            
+            logger.info(f"Evaluation complete. Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            if 'roc_auc' in metrics: logger.info(f" ROC AUC: {metrics['roc_auc']:.4f}")
+            elif 'roc_auc_ovr' in metrics: logger.info(f" ROC AUC (OvR): {metrics['roc_auc_ovr']:.4f}")
+                
+            return metrics
+        except Exception as e:
+            logger.exception(f"Error during evaluation: {e}")
+            return {"error": str(e)}
+            
+    def plot_feature_importance(self, feature_names: List[str], output_path: str):
+        """Plot feature importances for the Logistic Regression model."""
+        if self.model is None:
+            logger.error("Cannot plot feature importance: model not trained.")
+            return
+        if not hasattr(self.model, 'coef_'):
+            logger.error("Cannot plot feature importance: model does not have coefficients (coef_ attribute).")
+            return
+            
+        try:
+            # Get coefficients
+            if self.model.coef_.shape[0] == 1: # Binary classification (shape is (1, n_features))
+                 importances = self.model.coef_[0]
+            elif self.model.coef_.shape[0] > 1: # Multi-class (OvR or Multinomial)
+                 # Use the average absolute coefficient across classes as importance proxy
+                 importances = np.mean(np.abs(self.model.coef_), axis=0)
+                 logger.info("Using mean absolute coefficients across classes for multi-class feature importance.")
+            else:
+                 logger.error(f"Unexpected coefficient shape: {self.model.coef_.shape}")
+                 return
+
+            if len(importances) != len(feature_names):
+                 logger.error(f"Mismatch between number of coefficients ({len(importances)}) and feature names ({len(feature_names)}). Using indices instead.")
+                 feature_names_plot = [f"Feature {i}" for i in range(len(importances))]
+            else:
+                feature_names_plot = feature_names
+                
+            # Create dataframe for plotting
+            importance_df = pd.DataFrame({'feature': feature_names_plot, 'importance': importances})
+            importance_df = importance_df.sort_values('importance', key=abs, ascending=False)
+            
+            # Plot top N features (e.g., top 20)
+            top_n = min(20, len(importance_df))
+            plt.figure(figsize=(10, top_n / 2.5))
+            plt.barh(importance_df['feature'][:top_n], importance_df['importance'][:top_n])
+            plt.xlabel("Coefficient Value (Importance)")
+            plt.ylabel("Feature")
+            plt.title(f"Top {top_n} Feature Importances (Logistic Regression Coefficients)")
+            plt.gca().invert_yaxis() # Display most important at top
+            plt.tight_layout()
+            
+            # Save plot
+            plt.savefig(output_path)
+            plt.close()
+            logger.info(f"Saved feature importance plot to {output_path}")
+            
+        except Exception as e:
+             logger.exception(f"Error plotting feature importance: {e}")
 
 def plot_roc_curve(model, X_test, y_test, output_path=None):
     """
@@ -263,98 +347,66 @@ def plot_confusion_matrix(model, X_test, y_test, output_path=None):
         logger.error(f"Error plotting confusion matrix: {str(e)}")
         return None
 
-def standardize_features(X_train, X_test=None, X_val=None):
+def plot_feature_importance(model, feature_names, output_path=None):
     """
-    Standardize features by removing the mean and scaling to unit variance.
+    Plot feature importance for logistic regression model.
     
     Args:
-        X_train (numpy.ndarray): Training features.
-        X_test (numpy.ndarray, optional): Test features.
-        X_val (numpy.ndarray, optional): Validation features.
-        
-    Returns:
-        tuple: (X_train_scaled, X_test_scaled, X_val_scaled, scaler) - Scaled features and scaler.
-    """
-    if X_train is None:
-        logger.error("Cannot standardize None features")
-        return None, None, None, None
-    
-    try:
-        # Initialize scaler
-        scaler = StandardScaler()
-        
-        # Fit on training data and transform
-        X_train_scaled = scaler.fit_transform(X_train)
-        
-        # Transform test and validation data if provided
-        X_test_scaled = scaler.transform(X_test) if X_test is not None else None
-        X_val_scaled = scaler.transform(X_val) if X_val is not None else None
-        
-        logger.info("Features standardized")
-        
-        return X_train_scaled, X_test_scaled, X_val_scaled, scaler
-    
-    except Exception as e:
-        logger.error(f"Error standardizing features: {str(e)}")
-        return X_train, X_test, X_val, None
-
-def plot_feature_importance(model, feature_names, top_n=20, output_path=None):
-    """
-    Plot feature importance (coefficients) for a logistic regression model.
-    
-    Args:
-        model (LogisticRegression): Trained model.
+        model (LogisticRegression): Trained logistic regression model.
         feature_names (list): Names of features.
-        top_n (int, optional): Number of top features to show.
-        output_path (str, optional): Path to save the plot.
+        output_path (str, optional): Path to save the plot. If None, the plot is displayed.
         
     Returns:
-        matplotlib.figure.Figure: The feature importance figure.
+        matplotlib.figure.Figure: The figure object or None if plotting fails.
     """
-    if model is None or feature_names is None:
-        logger.error("Cannot plot feature importance with None inputs")
-        return None
-    
     try:
-        # Get coefficients
-        coefficients = model.coef_[0]
-        
-        # Create DataFrame
-        importance = pd.DataFrame({
-            'feature': feature_names,
-            'coefficient': coefficients
-        })
-        
-        # Sort by absolute coefficient value
-        importance['abs_coefficient'] = importance['coefficient'].abs()
-        importance = importance.sort_values('abs_coefficient', ascending=False)
-        
-        # Take top N features
-        top_importance = importance.head(top_n)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(12, 10))
-        bars = ax.barh(top_importance['feature'], top_importance['coefficient'])
-        
-        # Color bars based on coefficient sign
-        for i, bar in enumerate(bars):
-            if top_importance.iloc[i]['coefficient'] < 0:
-                bar.set_color('r')
+        if not feature_names or len(feature_names) == 0:
+            logger.warning("No feature names provided for plotting")
+            return None
+            
+        if hasattr(model, 'coef_'):
+            # For multi-class, average the coefficients across classes
+            if len(model.coef_.shape) > 1 and model.coef_.shape[0] > 1:
+                # Multi-class case
+                coefs = np.abs(model.coef_).mean(axis=0)
             else:
-                bar.set_color('g')
-        
-        ax.set_xlabel('Coefficient')
-        ax.set_title(f'Top {top_n} Features by Importance')
-        ax.axvline(x=0, color='k', linestyle='-', alpha=0.3)
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.tight_layout()
-            plt.savefig(output_path)
-            logger.info(f"Feature importance plot saved to {output_path}")
-        
-        return fig
-    
+                # Binary case
+                coefs = np.abs(model.coef_[0])
+                
+            # Make sure we have the right number of features
+            if len(coefs) == len(feature_names):
+                # Sort by importance
+                indices = np.argsort(coefs)[::-1]
+                sorted_feature_names = [feature_names[i] for i in indices]
+                sorted_coefs = coefs[indices]
+                
+                # Get top 20 features or all if less than 20
+                top_n = min(20, len(sorted_feature_names))
+                
+                # Create the plot
+                plt.figure(figsize=(12, 8))
+                plt.barh(range(top_n), sorted_coefs[:top_n], align='center')
+                plt.yticks(range(top_n), sorted_feature_names[:top_n])
+                plt.xlabel('Mean Absolute Coefficient')
+                plt.ylabel('Feature')
+                plt.title('Logistic Regression Feature Importance')
+                plt.tight_layout()
+                
+                # Save or show
+                if output_path:
+                    plt.savefig(output_path)
+                    logger.info(f"Saved feature importance plot to {output_path}")
+                    plt.close()
+                    return None
+                else:
+                    return plt.gcf()
+            else:
+                logger.warning(f"Number of coefficients ({len(coefs)}) doesn't match number of feature names ({len(feature_names)})")
+                return None
+        else:
+            logger.warning("Model doesn't have coefficients for plotting")
+            return None
+            
     except Exception as e:
         logger.error(f"Error plotting feature importance: {str(e)}")
         return None 

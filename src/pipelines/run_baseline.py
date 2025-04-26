@@ -12,7 +12,7 @@ import argparse
 import pandas as pd
 from datetime import datetime
 
-from src.pipelines.baseline_pipeline import run_baseline_pipeline, run_simple_baseline
+from src.pipelines.baseline_pipeline import run_baseline_pipeline
 from src.utils.dataloader import load_oasis_metadata
 
 def setup_logging(log_file=None):
@@ -72,6 +72,18 @@ def parse_args():
     parser.add_argument('--simple', action='store_true',
                         help="Run pipeline with simplified options")
     
+    # Range-based split options
+    parser.add_argument('--use_range', action='store_true',
+                        help="Use a specific range of indices for training instead of random split")
+    parser.add_argument('--train_start_idx', type=int, default=50,
+                        help="Start index for training range (default: 50)")
+    parser.add_argument('--train_end_idx', type=int, default=199,
+                        help="End index for training range (default: 199)")
+    
+    # Added option for combining CDR scores
+    parser.add_argument('--combine_cdr', action='store_true',
+                        help="Combine CDR scores 1 and 2 into a single category (>=1)")
+    
     return parser.parse_args()
 
 def main():
@@ -83,35 +95,50 @@ def main():
     logger.info(f"Metadata: {args.metadata_path}")
     logger.info(f"Data directory: {args.data_dir}")
     logger.info(f"Output directory: {args.output_dir}")
+    logger.info(f"Combine CDR scores 1 and 2: {args.combine_cdr}")
     
-    # Make sure output directory exists
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Output directory will be created by the pipeline function
+    # os.makedirs(args.output_dir, exist_ok=True) # Removed
     
     # Run pipeline
     try:
-        if args.simple:
-            logger.info("Running simplified baseline pipeline")
-            models, results = run_simple_baseline(
-                metadata_path=args.metadata_path,
-                data_dir=args.data_dir,
-                output_dir=args.output_dir,
-                model_types=args.model_types,
-                feature_types=args.feature_types
-            )
-        else:
-            logger.info("Running full baseline pipeline")
-            models, results = run_baseline_pipeline(
-                metadata_path=args.metadata_path,
-                data_dir=args.data_dir,
-                model_types=args.model_types,
-                feature_types=args.feature_types,
-                output_dir=args.output_dir,
-                test_size=args.test_size,
-                val_size=args.val_size,
-                n_features=args.n_features
-            )
+        # Determine pipeline parameters based on args
+        split_strategy = 'range' if args.use_range else 'stratified' # Default to stratified
+        train_range = (args.train_start_idx, args.train_end_idx) if args.use_range else None
         
-        if models is not None and results is not None:
+        # Handle --simple flag overrides
+        if args.simple:
+             logger.info("Using --simple flag: Overriding test_size=0.2, val_size=0.1, n_features=20")
+             test_size = 0.2
+             val_size = 0.1
+             n_features = 20
+             # Simple mode implies random split unless --use_range is also specified
+             if not args.use_range:
+                 split_strategy = 'stratified' # Or could default to 'subject' if preferred for simple
+        else:
+             test_size = args.test_size
+             val_size = args.val_size
+             n_features = args.n_features
+
+        # Call the consolidated pipeline function
+        logger.info(f"Running baseline pipeline with strategy: {split_strategy}")
+        trained_data, results = run_baseline_pipeline(
+            metadata_path=args.metadata_path,
+            data_dir=args.data_dir,
+            output_dir=args.output_dir, # Base output dir
+            model_types=args.model_types,
+            feature_types=args.feature_types,
+            split_strategy=split_strategy,
+            test_size=test_size,
+            val_size=val_size,
+            train_range=train_range,
+            n_features=n_features,
+            combine_cdr=args.combine_cdr,
+            # Add random_state if needed for reproducibility
+            # random_state=42 
+        )
+
+        if trained_data is not None and results is not None:
             logger.info("Pipeline completed successfully")
             return 0
         else:

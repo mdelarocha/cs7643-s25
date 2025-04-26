@@ -5,421 +5,187 @@ K-Nearest Neighbors baseline model for Alzheimer's detection.
 import numpy as np
 import pandas as pd
 import logging
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import GridSearchCV, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
-from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-import seaborn as sns
+from typing import Optional, Tuple, Dict, Any, List
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV, cross_val_score
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
+    confusion_matrix, classification_report, log_loss
+)
+
+from ..base_model import BaseModel # Import base class
 
 logger = logging.getLogger(__name__)
 
-def train_knn(X_train, y_train, n_neighbors=5, weights='uniform', metric='minkowski', p=2):
-    """
-    Train a K-Nearest Neighbors classifier with specified parameters.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        n_neighbors (int, optional): Number of neighbors.
-        weights (str, optional): Weight function ('uniform' or 'distance').
-        metric (str, optional): Distance metric.
-        p (int, optional): Power parameter for Minkowski metric.
-        
-    Returns:
-        KNeighborsClassifier: Trained model.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot train model with None inputs")
-        return None
-    
-    try:
-        # Initialize and train model
-        model = KNeighborsClassifier(
-            n_neighbors=n_neighbors,
-            weights=weights,
-            metric=metric,
-            p=p,
-            n_jobs=-1
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Log model information
-        train_accuracy = model.score(X_train, y_train)
-        logger.info(f"Trained KNN model (n_neighbors={n_neighbors}, weights={weights}, metric={metric})")
-        logger.info(f"Training accuracy: {train_accuracy:.4f}")
-        
-        return model
-    
-    except Exception as e:
-        logger.error(f"Error training KNN model: {str(e)}")
-        return None
+# --- Helper function for scaling ---
+def _standardize_features(X_train: np.ndarray, X_val: Optional[np.ndarray] = None, X_test: Optional[np.ndarray] = None) \
+                         -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], StandardScaler]:
+    """Standardize features using StandardScaler."""
+    scaler = StandardScaler()
+    X_train_std = scaler.fit_transform(X_train)
+    logger.info(f"Scaled training data (KNN). Mean: {np.mean(X_train_std):.3f}, Std: {np.std(X_train_std):.3f}")
+    X_val_std = scaler.transform(X_val) if X_val is not None else None
+    if X_val_std is not None: logger.debug("Scaled validation data (KNN).")
+    X_test_std = scaler.transform(X_test) if X_test is not None else None
+    if X_test_std is not None: logger.debug("Scaled test data (KNN).")
+    return X_train_std, X_val_std, X_test_std, scaler
 
-def hyperparameter_tuning(X_train, y_train, X_val=None, y_val=None, cv=5, scoring='accuracy'):
-    """
-    Perform hyperparameter tuning for K-Nearest Neighbors.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        X_val (numpy.ndarray, optional): Validation features.
-        y_val (numpy.ndarray, optional): Validation labels.
-        cv (int, optional): Number of cross-validation folds.
-        scoring (str, optional): Scoring metric.
-        
-    Returns:
-        tuple: (best_model, grid_results) - Best model and grid search results.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot tune hyperparameters with None inputs")
-        return None, None
-    
-    try:
-        # Define parameter grid
-        param_grid = {
-            'n_neighbors': [3, 5, 7, 9, 11, 13, 15],
-            'weights': ['uniform', 'distance'],
-            'metric': ['euclidean', 'manhattan', 'minkowski'],
-            'p': [1, 2]  # p=1 for manhattan, p=2 for euclidean
-        }
-        
-        # Initialize grid search
-        grid_search = GridSearchCV(
-            KNeighborsClassifier(n_jobs=-1),
-            param_grid=param_grid,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=-1
-        )
-        
-        # Fit grid search
-        grid_search.fit(X_train, y_train)
-        
-        # Get best model
-        best_model = grid_search.best_estimator_
-        
-        # Log results
-        logger.info(f"Best parameters: {grid_search.best_params_}")
-        logger.info(f"Best cross-validation {scoring}: {grid_search.best_score_:.4f}")
-        
-        # Evaluate on validation set if provided
-        if X_val is not None and y_val is not None:
-            val_accuracy = best_model.score(X_val, y_val)
-            logger.info(f"Validation accuracy: {val_accuracy:.4f}")
-        
-        return best_model, grid_search.cv_results_
-    
-    except Exception as e:
-        logger.error(f"Error in hyperparameter tuning: {str(e)}")
-        return None, None
+# --- Helper function to find optimal K ---
+def find_optimal_k(X_train_std: np.ndarray, y_train: np.ndarray, 
+                   X_val_std: np.ndarray, y_val: np.ndarray, 
+                   k_range: Tuple[int, int] = (1, 31), step: int = 2) -> Optional[int]:
+    """Find the optimal K value using validation set accuracy."""
+    logger.info(f"Finding optimal K for KNN in range {k_range}...")
+    k_values = range(k_range[0], k_range[1], step)
+    val_accuracies = []
 
-def evaluate_model(model, X_test, y_test):
-    """
-    Evaluate a trained K-Nearest Neighbors model.
-    
-    Args:
-        model (KNeighborsClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        
-    Returns:
-        dict: Dictionary of evaluation metrics.
-    """
-    if model is None or X_test is None or y_test is None:
-        logger.error("Cannot evaluate model with None inputs")
-        return {}
-    
     try:
-        # Make predictions
-        y_pred = model.predict(X_test)
-        y_pred_proba = model.predict_proba(X_test)[:, 1] if len(model.classes_) == 2 else None
-        
-        # Calculate metrics
-        metrics = {}
-        metrics['accuracy'] = accuracy_score(y_test, y_pred)
-        metrics['classification_report'] = classification_report(y_test, y_pred, output_dict=True)
-        metrics['confusion_matrix'] = confusion_matrix(y_test, y_pred).tolist()
-        
-        # ROC AUC for binary classification
-        if y_pred_proba is not None:
-            metrics['roc_auc'] = roc_auc_score(y_test, y_pred_proba)
-        
-        # Log results
-        logger.info(f"Test accuracy: {metrics['accuracy']:.4f}")
-        if 'roc_auc' in metrics:
-            logger.info(f"ROC AUC: {metrics['roc_auc']:.4f}")
-        
-        return metrics
-    
-    except Exception as e:
-        logger.error(f"Error evaluating model: {str(e)}")
-        return {}
+        for k in k_values:
+            knn = KNeighborsClassifier(n_neighbors=k)
+            knn.fit(X_train_std, y_train)
+            val_preds = knn.predict(X_val_std)
+            accuracy = accuracy_score(y_val, val_preds)
+            val_accuracies.append(accuracy)
+            logger.debug(f"  K={k}, Validation Accuracy={accuracy:.4f}")
 
-def plot_roc_curve(model, X_test, y_test, output_path=None):
-    """
-    Plot ROC curve for a binary K-Nearest Neighbors model.
-    
-    Args:
-        model (KNeighborsClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The ROC curve figure.
-    """
-    if len(model.classes_) != 2:
-        logger.error("ROC curve can only be plotted for binary classification")
-        return None
-    
-    try:
-        from sklearn.metrics import roc_curve, auc
-        
-        # Get predicted probabilities
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
-        
-        # Calculate ROC curve
-        fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-        roc_auc = auc(fpr, tpr)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
-        ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-        ax.set_xlim([0.0, 1.0])
-        ax.set_ylim([0.0, 1.05])
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('Receiver Operating Characteristic')
-        ax.legend(loc="lower right")
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.savefig(output_path)
-            logger.info(f"ROC curve saved to {output_path}")
-        
-        return fig
-    
+        if not val_accuracies:
+             logger.warning("Could not calculate validation accuracies for any K.")
+             return None
+             
+        best_k_index = np.argmax(val_accuracies)
+        optimal_k = k_values[best_k_index]
+        logger.info(f"Optimal K found: {optimal_k} (Validation Accuracy: {val_accuracies[best_k_index]:.4f})")
+        return optimal_k
     except Exception as e:
-        logger.error(f"Error plotting ROC curve: {str(e)}")
+        logger.exception(f"Error finding optimal K: {e}")
         return None
 
-def plot_confusion_matrix(model, X_test, y_test, output_path=None):
-    """
-    Plot confusion matrix for a K-Nearest Neighbors model.
-    
-    Args:
-        model (KNeighborsClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The confusion matrix figure.
-    """
-    try:
-        # Make predictions
-        y_pred = model.predict(X_test)
-        
-        # Get confusion matrix
-        cm = confusion_matrix(y_test, y_pred)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-        ax.set_xlabel('Predicted labels')
-        ax.set_ylabel('True labels')
-        ax.set_title('Confusion Matrix')
-        ax.set_xticklabels(model.classes_)
-        ax.set_yticklabels(model.classes_)
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.savefig(output_path)
-            logger.info(f"Confusion matrix saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting confusion matrix: {str(e)}")
-        return None
+# --- KNN Model Class ---
+class KNNModel(BaseModel):
+    """K-Nearest Neighbors (KNN) model implementing the BaseModel interface."""
 
-def standardize_features(X_train, X_test=None, X_val=None):
-    """
-    Standardize features by removing the mean and scaling to unit variance.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        X_test (numpy.ndarray, optional): Test features.
-        X_val (numpy.ndarray, optional): Validation features.
-        
-    Returns:
-        tuple: (X_train_scaled, X_test_scaled, X_val_scaled, scaler) - Scaled features and scaler.
-    """
-    if X_train is None:
-        logger.error("Cannot standardize None features")
-        return None, None, None, None
-    
-    try:
-        # Initialize scaler
-        scaler = StandardScaler()
-        
-        # Fit on training data and transform
-        X_train_scaled = scaler.fit_transform(X_train)
-        
-        # Transform test and validation data if provided
-        X_test_scaled = scaler.transform(X_test) if X_test is not None else None
-        X_val_scaled = scaler.transform(X_val) if X_val is not None else None
-        
-        logger.info("Features standardized")
-        
-        return X_train_scaled, X_test_scaled, X_val_scaled, scaler
-    
-    except Exception as e:
-        logger.error(f"Error standardizing features: {str(e)}")
-        return X_train, X_test, X_val, None
+    @property
+    def needs_scaling(self) -> bool:
+        return True
 
-def find_optimal_k(X_train, y_train, X_val, y_val, k_range=None, metric='accuracy'):
-    """
-    Find the optimal number of neighbors (k) for KNN.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        X_val (numpy.ndarray): Validation features.
-        y_val (numpy.ndarray): Validation labels.
-        k_range (list, optional): Range of k values to try.
-        metric (str, optional): Evaluation metric.
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, 
+            X_val: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None) -> 'KNNModel':
+        """Fit the KNN model, performing standardization and finding optimal K if validation data is provided."""
+        logger.info(f"Fitting KNN model...")
         
-    Returns:
-        tuple: (optimal_k, metrics_dict, fig) - Optimal k value, metrics for each k, and figure.
-    """
-    if X_train is None or y_train is None or X_val is None or y_val is None:
-        logger.error("Cannot find optimal k with None inputs")
-        return None, None, None
-    
-    if k_range is None:
-        k_range = list(range(1, min(31, len(X_train))))
-    
-    try:
-        # Initialize metrics
-        metrics = {'k': k_range, 'accuracy': [], 'roc_auc': []}
-        
-        # Evaluate each k
-        for k in k_range:
-            # Train model
-            model = train_knn(X_train, y_train, n_neighbors=k)
-            
-            # Make predictions
-            y_pred = model.predict(X_val)
-            
-            # Calculate accuracy
-            accuracy = accuracy_score(y_val, y_pred)
-            metrics['accuracy'].append(accuracy)
-            
-            # Calculate ROC AUC for binary classification
-            if len(np.unique(y_train)) == 2:
-                y_pred_proba = model.predict_proba(X_val)[:, 1]
-                roc_auc = roc_auc_score(y_val, y_pred_proba)
-                metrics['roc_auc'].append(roc_auc)
-        
-        # Find optimal k
-        if metric == 'roc_auc' and 'roc_auc' in metrics:
-            optimal_k = k_range[np.argmax(metrics['roc_auc'])]
-            best_score = np.max(metrics['roc_auc'])
-            logger.info(f"Optimal k: {optimal_k} with ROC AUC: {best_score:.4f}")
+        # 1. Standardize features
+        try:
+            X_train_std, X_val_std, _, self.scaler = _standardize_features(X_train, X_val)
+        except Exception as e:
+             logger.exception(f"Error during standardization for KNN: {e}")
+             raise
+
+        # 2. Determine K value
+        k = self.model_params.get('n_neighbors', 5) # Default K
+        if X_val_std is not None and y_val is not None:
+             # Find optimal k if validation data is present and no specific k is forced
+             if 'n_neighbors' not in self.model_params:
+                 optimal_k = find_optimal_k(X_train_std, y_train, X_val_std, y_val)
+                 if optimal_k:
+                     k = optimal_k
+                 else:
+                      logger.warning("Failed to find optimal K, using default k={k}")
+             else:
+                  logger.info(f"Using pre-defined k={k} from model_params.")
         else:
-            optimal_k = k_range[np.argmax(metrics['accuracy'])]
-            best_score = np.max(metrics['accuracy'])
-            logger.info(f"Optimal k: {optimal_k} with accuracy: {best_score:.4f}")
-        
-        # Plot results
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.plot(k_range, metrics['accuracy'], marker='o', linestyle='-', label='Accuracy')
-        
-        if 'roc_auc' in metrics:
-            ax.plot(k_range, metrics['roc_auc'], marker='s', linestyle='-', label='ROC AUC')
-        
-        ax.set_xlabel('Number of Neighbors (k)')
-        ax.set_ylabel('Score')
-        ax.set_title('KNN Performance vs. Number of Neighbors')
-        ax.legend()
-        ax.grid(True)
-        
-        # Highlight optimal k
-        ax.axvline(x=optimal_k, color='r', linestyle='--', alpha=0.5)
-        ax.text(optimal_k, 0.5, f'Optimal k = {optimal_k}', rotation=90, verticalalignment='center')
-        
-        return optimal_k, metrics, fig
-    
-    except Exception as e:
-        logger.error(f"Error finding optimal k: {str(e)}")
-        return None, None, None
+             logger.info(f"No validation data provided or k specified. Using default k={k}.")
 
-def plot_decision_regions(X, y, model, feature_idx1=0, feature_idx2=1, resolution=0.02, output_path=None):
-    """
-    Plot decision regions for a KNN model (for 2D visualization).
-    
-    Args:
-        X (numpy.ndarray): Feature matrix.
-        y (numpy.ndarray): Labels.
-        model (KNeighborsClassifier): Trained model.
-        feature_idx1 (int, optional): Index of first feature to plot.
-        feature_idx2 (int, optional): Index of second feature to plot.
-        resolution (float, optional): Resolution of the mesh grid.
-        output_path (str, optional): Path to save the plot.
+        # 3. Train final KNN model
+        logger.info(f"Training final KNN model with k={k}.")
+        try:
+            # Get other params like weights, metric from model_params or use defaults
+            weights = self.model_params.get('weights', 'uniform')
+            metric = self.model_params.get('metric', 'minkowski')
+            
+            self.model = KNeighborsClassifier(n_neighbors=k, weights=weights, metric=metric, n_jobs=-1)
+            self.model.fit(X_train_std, y_train)
+            logger.info("KNN model training complete.")
+
+        except Exception as e:
+            logger.exception(f"Error training final KNN model with k={k}: {e}")
+            raise
+             
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions. Applies scaling."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if self.scaler is None: raise RuntimeError("Scaler not fitted.")
         
-    Returns:
-        matplotlib.figure.Figure: The decision regions figure.
-    """
-    if model is None or X is None or y is None:
-        logger.error("Cannot plot decision regions with None inputs")
-        return None
-    
-    try:
-        # Select two features for visualization
-        X_subset = X[:, [feature_idx1, feature_idx2]]
-        
-        # Define mesh grid
-        x1_min, x1_max = X_subset[:, 0].min() - 1, X_subset[:, 0].max() + 1
-        x2_min, x2_max = X_subset[:, 1].min() - 1, X_subset[:, 1].max() + 1
-        xx1, xx2 = np.meshgrid(np.arange(x1_min, x1_max, resolution),
-                            np.arange(x2_min, x2_max, resolution))
-        
-        # Create dummy features for prediction
-        dummy_features = np.zeros((xx1.ravel().shape[0], X.shape[1]))
-        dummy_features[:, feature_idx1] = xx1.ravel()
-        dummy_features[:, feature_idx2] = xx2.ravel()
-        
-        # Make predictions
-        Z = model.predict(dummy_features)
-        Z = Z.reshape(xx1.shape)
-        
-        # Plot decision regions
-        fig, ax = plt.subplots(figsize=(12, 10))
-        contour = ax.contourf(xx1, xx2, Z, alpha=0.3, cmap='viridis')
-        
-        # Plot data points
-        scatter = ax.scatter(X_subset[:, 0], X_subset[:, 1], c=y, edgecolors='k', cmap='viridis')
-        
-        # Set labels and title
-        ax.set_xlabel(f'Feature {feature_idx1}')
-        ax.set_ylabel(f'Feature {feature_idx2}')
-        ax.set_title('Decision Regions for KNN Model')
-        
-        # Add legend
-        legend1 = ax.legend(*scatter.legend_elements(), title="Classes")
-        ax.add_artist(legend1)
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.tight_layout()
-            plt.savefig(output_path)
-            logger.info(f"Decision regions plot saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting decision regions: {str(e)}")
-        return None 
+        try:
+            X_std = self.scaler.transform(X)
+            predictions = self.model.predict(X_std)
+            return predictions
+        except Exception as e:
+             logger.exception(f"Error during prediction: {e}")
+             raise
+
+    def predict_proba(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """Predict class probabilities. Applies scaling."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if self.scaler is None: raise RuntimeError("Scaler not fitted.")
+             
+        try:
+            X_std = self.scaler.transform(X)
+            probabilities = self.model.predict_proba(X_std)
+            return probabilities
+        except Exception as e:
+             logger.exception(f"Error during probability prediction: {e}")
+             raise
+
+    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """Evaluate the model. Applies scaling."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if self.scaler is None: raise RuntimeError("Scaler not fitted.")
+
+        logger.info(f"Evaluating KNN model (k={self.model.n_neighbors})...")
+        try:
+            X_test_std = self.scaler.transform(X_test)
+            y_pred = self.model.predict(X_test_std)
+            y_prob = self.model.predict_proba(X_test_std) # Get probabilities for all classes
+            
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            cm = confusion_matrix(y_test, y_pred)
+            report = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
+            
+            metrics = {'accuracy': accuracy, 'precision': precision, 'recall': recall,
+                       'f1_score': f1, 'confusion_matrix': cm, 'classification_report': report}
+            
+            # Add AUC and LogLoss (handle binary vs multi-class)
+            num_classes = len(np.unique(y_test))
+            if num_classes >= 2:
+                try:
+                     if num_classes == 2:
+                          positive_class_idx = np.where(self.model.classes_ == np.max(y_test))[0][0]
+                          metrics['roc_auc'] = roc_auc_score(y_test, y_prob[:, positive_class_idx])
+                     else: # Multi-class
+                          metrics['roc_auc_ovr'] = roc_auc_score(y_test, y_prob, multi_class='ovr', average='weighted')
+                     metrics['log_loss'] = log_loss(y_test, y_prob)
+                except ValueError as auc_err:
+                     logger.warning(f"Could not calculate ROC AUC or LogLoss for KNN: {auc_err}") 
+            
+            logger.info(f"Evaluation complete. Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            if 'roc_auc' in metrics: logger.info(f" ROC AUC: {metrics['roc_auc']:.4f}")
+            elif 'roc_auc_ovr' in metrics: logger.info(f" ROC AUC (OvR): {metrics['roc_auc_ovr']:.4f}")
+                
+            return metrics
+        except Exception as e:
+            logger.exception(f"Error during evaluation: {e}")
+            return {"error": str(e)}
+            
+    # KNN does not have intrinsic feature importance
+    def plot_feature_importance(self, feature_names: List[str], output_path: str):
+        """Feature importance is not applicable for KNN."""
+        super().plot_feature_importance(feature_names, output_path) # Calls base method warning 

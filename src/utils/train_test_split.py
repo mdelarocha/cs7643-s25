@@ -61,6 +61,69 @@ def split_data_by_subject(metadata_df, test_size=0.2, val_size=0.1, random_state
         
         return train_df, None, test_df
 
+def split_data_by_range(metadata_df, train_start_idx=50, train_end_idx=199, test_size=0.2, val_size=0.1, random_state=42):
+    """
+    Split data using a specific range of indices for training set, and the remaining data for test/validation.
+    
+    Args:
+        metadata_df (pandas.DataFrame): DataFrame containing subject IDs and other metadata.
+        train_start_idx (int): Start index for the training set.
+        train_end_idx (int): End index for the training set.
+        test_size (float, optional): Proportion of the remaining data to include in the test split.
+        val_size (float, optional): Proportion of the remaining data to include in the validation split.
+        random_state (int, optional): Random seed for reproducibility.
+        
+    Returns:
+        tuple: (train_df, val_df, test_df) - The split DataFrames.
+    """
+    # Verify that indices are within range
+    if train_start_idx < 0 or train_end_idx >= len(metadata_df):
+        logger.warning(f"Invalid index range: {train_start_idx}-{train_end_idx} for dataframe of length {len(metadata_df)}")
+        logger.warning("Defaulting to standard split")
+        return split_data_by_subject(metadata_df, test_size, val_size, random_state)
+    
+    # Get range for training set
+    train_indices = list(range(train_start_idx, min(train_end_idx + 1, len(metadata_df))))
+    
+    # Get remainder indices for test/validation
+    remaining_indices = [i for i in range(len(metadata_df)) if i < train_start_idx or i > train_end_idx]
+    
+    # Create training dataframe
+    train_df = metadata_df.iloc[train_indices].copy()
+    
+    # If no remaining data, return only training set
+    if not remaining_indices:
+        logger.warning("No data left for test/validation. Returning only training set.")
+        return train_df, None, None
+    
+    # Split remaining data into test and validation
+    remaining_df = metadata_df.iloc[remaining_indices].copy()
+    
+    # Split remaining data into test and validation
+    if val_size > 0:
+        # Get proportion for test from the remaining data
+        effective_test_size = test_size / (test_size + val_size)
+        
+        # Split remaining data
+        test_df, val_df = train_test_split(
+            remaining_df,
+            test_size=(1 - effective_test_size),  # validation gets the rest
+            random_state=random_state
+        )
+        
+        logger.info(f"Split data: train ({len(train_df)} entries, indices {train_start_idx}-{train_end_idx}), "
+                   f"validation ({len(val_df)} entries), and test ({len(test_df)} entries)")
+        
+        return train_df, val_df, test_df
+    else:
+        # All remaining data goes to test
+        test_df = remaining_df
+        
+        logger.info(f"Split data: train ({len(train_df)} entries, indices {train_start_idx}-{train_end_idx}) "
+                   f"and test ({len(test_df)} entries)")
+        
+        return train_df, None, test_df
+
 def create_stratified_split(metadata_df, label_column='CDR', test_size=0.2, val_size=0.1, random_state=42):
     """
     Create a stratified train/validation/test split based on labels.

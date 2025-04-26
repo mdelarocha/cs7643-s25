@@ -12,6 +12,7 @@ from sklearn.feature_selection import VarianceThreshold
 from sklearn.feature_selection import RFE
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -389,9 +390,114 @@ def select_features_from_combined(X, feature_names, top_features):
         logger.warning("No matching features found, returning all features")
         return X, list(range(len(feature_names)))
     
+    # Convert selected_indices to numpy array
+    selected_indices = np.array(selected_indices)
+    
     # Select columns from X
     X_selected = X[:, selected_indices]
     
+    # Ensure X_selected is a 2D numpy array
+    if len(X_selected.shape) == 1:
+        X_selected = X_selected.reshape(-1, 1)
+    
     logger.info(f"Selected {X_selected.shape[1]} features based on combined importance")
     
-    return X_selected, selected_indices 
+    return X_selected, selected_indices
+
+# New combined function (adapted from baseline_pipeline.py)
+def select_top_k_features_combined(X_train: np.ndarray, y_train: np.ndarray, X_test: Optional[np.ndarray],
+                                  X_val: Optional[np.ndarray],
+                                  feature_names: List[str], n_features: int,
+                                  methods: Optional[List[str]] = None) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], List[str], Optional[pd.DataFrame]]:
+    """
+    Performs feature selection using a pipeline, combines results, and selects top k features.
+
+    Args:
+        X_train: Training features.
+        y_train: Training labels.
+        X_test: Test features.
+        X_val: Validation features (optional).
+        feature_names: List of original feature names.
+        n_features: Number of top features to select.
+        methods: List of selection methods to use in the pipeline (e.g., ['f_classif', 'random_forest']).
+
+    Returns:
+        Tuple containing:
+            - X_train_selected: Selected training features.
+            - X_test_selected: Selected test features.
+            - X_val_selected: Selected validation features (or None).
+            - selected_feature_names: Names of the selected features.
+            - importance_df: DataFrame with combined feature importance scores.
+        Returns original features if selection fails or is skipped.
+    """
+    if X_train is None or y_train is None or X_test is None or not feature_names:
+        logger.error("Cannot select features with None inputs for train/test data or feature names.")
+        return X_train, X_test, X_val, feature_names, None
+
+    # Skip selection if n_features is invalid or not needed
+    if n_features <= 0 or n_features >= X_train.shape[1]:
+        logger.info(f"Skipping feature selection: n_features ({n_features}) out of range or equals total features ({X_train.shape[1]}).")
+        return X_train, X_test, X_val, feature_names, None
+
+    if methods is None:
+        methods = ['f_classif', 'random_forest'] # Default methods
+
+    X_train_selected, X_test_selected, X_val_selected = X_train, X_test, X_val
+    selected_feature_names = feature_names
+    final_importance_df = None
+
+    try:
+        logger.info(f"Running feature selection pipeline with methods: {methods}, target features: {n_features}")
+        selection_results = feature_selection_pipeline(X_train, y_train, feature_names, methods, n_features)
+
+        if not selection_results or 'methods' not in selection_results or not selection_results['methods']:
+            logger.warning("Feature selection pipeline did not return valid results. Using all features.")
+            return X_train, X_test, X_val, feature_names, None
+
+        importance_df = get_combined_feature_importance(selection_results, top_k=n_features * 2) # Get more than k initially
+        final_importance_df = importance_df # Store for return
+
+        if importance_df is None or importance_df.empty:
+            logger.warning("Could not obtain combined feature importance. Using all features.")
+            return X_train, X_test, X_val, feature_names, final_importance_df
+
+        # Select exactly n_features if possible
+        top_features = importance_df.index.tolist()[:n_features]
+
+        if not top_features:
+            logger.warning("No top features identified from importance data. Using all features.")
+            return X_train, X_test, X_val, feature_names, final_importance_df
+
+        # Apply selection to train, test, and val sets
+        logger.info(f"Applying selection for top {len(top_features)} features: {top_features}")
+        X_train_sel, sel_indices_train = select_features_from_combined(X_train, feature_names, top_features)
+        X_test_sel, sel_indices_test = select_features_from_combined(X_test, feature_names, top_features)
+
+        # Validate selection results
+        if (X_train_sel is None or X_test_sel is None or
+            X_train_sel.shape[1] != len(top_features) or X_test_sel.shape[1] != len(top_features)):
+            logger.warning("Feature selection failed during application or resulted in unexpected shape. Using all features.")
+            return X_train, X_test, X_val, feature_names, final_importance_df
+
+        X_train_selected = X_train_sel
+        X_test_selected = X_test_sel
+        selected_feature_names = top_features
+
+        # Apply to validation set if it exists
+        if X_val is not None:
+            X_val_sel, _ = select_features_from_combined(X_val, feature_names, top_features)
+            if X_val_sel is not None and X_val_sel.shape[1] == len(top_features):
+                X_val_selected = X_val_sel
+                logger.info(f"Applied feature selection to validation set. Shape: {X_val_selected.shape}")
+            else:
+                logger.warning("Failed to apply consistent feature selection to validation set. Setting validation set to None.")
+                X_val_selected = None # Invalidate validation set if selection failed
+
+        logger.info(f"Successfully selected {len(selected_feature_names)} features.")
+
+    except Exception as e:
+        logger.exception(f"Error during combined feature selection: {e}")
+        # Return original features on error
+        return X_train, X_test, X_val, feature_names, final_importance_df
+
+    return X_train_selected, X_test_selected, X_val_selected, selected_feature_names, final_importance_df 

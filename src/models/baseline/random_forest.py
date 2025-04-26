@@ -5,366 +5,206 @@ Random Forest baseline model for Alzheimer's detection.
 import numpy as np
 import pandas as pd
 import logging
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GridSearchCV, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
 import matplotlib.pyplot as plt
-import seaborn as sns
+from typing import Optional, Dict, Any, List
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, 
+    confusion_matrix, classification_report, log_loss
+)
+
+from ..base_model import BaseModel # Import base class
 
 logger = logging.getLogger(__name__)
 
-def train_random_forest(X_train, y_train, n_estimators=100, max_depth=None, max_features='sqrt', 
-                       min_samples_split=2, min_samples_leaf=1, class_weight=None, random_state=42):
-    """
-    Train a Random Forest classifier with specified parameters.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        n_estimators (int, optional): Number of trees.
-        max_depth (int, optional): Maximum depth of trees.
-        max_features (str or int, optional): Number of features to consider for best split.
-        min_samples_split (int, optional): Minimum samples required to split a node.
-        min_samples_leaf (int, optional): Minimum samples required at a leaf node.
-        class_weight (dict or str, optional): Class weights.
-        random_state (int, optional): Random seed.
-        
-    Returns:
-        RandomForestClassifier: Trained model.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot train model with None inputs")
-        return None
-    
-    try:
-        # Initialize and train model
-        model = RandomForestClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            max_features=max_features,
-            min_samples_split=min_samples_split,
-            min_samples_leaf=min_samples_leaf,
-            class_weight=class_weight,
-            random_state=random_state,
-            n_jobs=-1
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Log model information
-        train_accuracy = model.score(X_train, y_train)
-        logger.info(f"Trained Random Forest model (n_estimators={n_estimators}, max_depth={max_depth})")
-        logger.info(f"Training accuracy: {train_accuracy:.4f}")
-        
-        return model
-    
-    except Exception as e:
-        logger.error(f"Error training Random Forest model: {str(e)}")
-        return None
+# --- Random Forest Model Class ---
+class RandomForestModel(BaseModel):
+    """Random Forest model implementing the BaseModel interface."""
 
-def hyperparameter_tuning(X_train, y_train, X_val=None, y_val=None, cv=5, scoring='accuracy', random_state=42):
-    """
-    Perform hyperparameter tuning for Random Forest.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        X_val (numpy.ndarray, optional): Validation features.
-        y_val (numpy.ndarray, optional): Validation labels.
-        cv (int, optional): Number of cross-validation folds.
-        scoring (str, optional): Scoring metric.
-        random_state (int, optional): Random seed.
+    @property
+    def needs_scaling(self) -> bool:
+        return False # Random Forest is generally less sensitive to feature scaling
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, 
+            X_val: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None) -> 'RandomForestModel':
+        """Fit the Random Forest model, optionally performing hyperparameter tuning."""
+        logger.info(f"Fitting RandomForest model...")
         
-    Returns:
-        tuple: (best_model, grid_results) - Best model and grid search results.
-    """
-    if X_train is None or y_train is None:
-        logger.error("Cannot tune hyperparameters with None inputs")
-        return None, None
-    
-    try:
-        # Define parameter grid
-        param_grid = {
-            'n_estimators': [50, 100, 200],
+        # No scaling needed for Random Forest generally
+        self.scaler = None # Explicitly set scaler to None
+
+        # Define parameter grid/distribution for tuning
+        # Use model_params passed during init or defaults
+        default_params = {
+            'n_estimators': [100, 200, 300],
             'max_depth': [None, 10, 20, 30],
             'min_samples_split': [2, 5, 10],
             'min_samples_leaf': [1, 2, 4],
-            'max_features': ['sqrt', 'log2'],
-            'class_weight': [None, 'balanced']
+            'bootstrap': [True, False]
         }
-        
-        # Initialize grid search
-        grid_search = GridSearchCV(
-            RandomForestClassifier(random_state=random_state),
-            param_grid=param_grid,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=-1
-        )
-        
-        # Fit grid search
-        grid_search.fit(X_train, y_train)
-        
-        # Get best model
-        best_model = grid_search.best_estimator_
-        
-        # Log results
-        logger.info(f"Best parameters: {grid_search.best_params_}")
-        logger.info(f"Best cross-validation {scoring}: {grid_search.best_score_:.4f}")
-        
-        # Evaluate on validation set if provided
-        if X_val is not None and y_val is not None:
-            val_accuracy = best_model.score(X_val, y_val)
-            logger.info(f"Validation accuracy: {val_accuracy:.4f}")
-        
-        return best_model, grid_search.cv_results_
-    
-    except Exception as e:
-        logger.error(f"Error in hyperparameter tuning: {str(e)}")
-        return None, None
+        # Option to use RandomizedSearchCV for larger spaces
+        use_random_search = self.model_params.get('use_random_search', False)
+        param_config = self.model_params.get('param_config', default_params)
+        n_iter = self.model_params.get('n_iter', 10) # For RandomizedSearch
+        cv = self.model_params.get('cv', 5)
+        # Default to f1_weighted for multi-class compatibility, allow override via params
+        scoring = self.model_params.get('scoring', 'f1_weighted')
 
-def evaluate_model(model, X_test, y_test, feature_names=None):
-    """
-    Evaluate a trained Random Forest model.
-    
-    Args:
-        model (RandomForestClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        feature_names (list, optional): Names of features.
+        # Perform Hyperparameter Tuning (GridSearch or RandomizedSearch)
+        rf = RandomForestClassifier(random_state=42, class_weight='balanced') # Use balanced class weights
+
+        if use_random_search:
+            logger.info(f"Performing RandomizedSearchCV for RandomForest (CV={cv}, N_iter={n_iter}, Scoring={scoring}). Dist: {param_config}")
+            search = RandomizedSearchCV(rf, param_distributions=param_config, n_iter=n_iter, cv=cv, scoring=scoring, n_jobs=-1, random_state=42)
+        else:
+            logger.info(f"Performing GridSearchCV for RandomForest (CV={cv}, Scoring={scoring}). Grid: {param_config}")
+            search = GridSearchCV(rf, param_grid=param_config, cv=cv, scoring=scoring, n_jobs=-1)
         
-    Returns:
-        dict: Dictionary of evaluation metrics.
-    """
-    if model is None or X_test is None or y_test is None:
-        logger.error("Cannot evaluate model with None inputs")
-        return {}
-    
-    try:
-        # Make predictions
-        y_pred = model.predict(X_test)
-        y_pred_proba = model.predict_proba(X_test)[:, 1] if len(model.classes_) == 2 else None
-        
-        # Calculate metrics
-        metrics = {}
-        metrics['accuracy'] = accuracy_score(y_test, y_pred)
-        metrics['classification_report'] = classification_report(y_test, y_pred, output_dict=True)
-        metrics['confusion_matrix'] = confusion_matrix(y_test, y_pred).tolist()
-        
-        # ROC AUC for binary classification
-        if y_pred_proba is not None:
-            metrics['roc_auc'] = roc_auc_score(y_test, y_pred_proba)
-        
-        # Log results
-        logger.info(f"Test accuracy: {metrics['accuracy']:.4f}")
-        if 'roc_auc' in metrics:
-            logger.info(f"ROC AUC: {metrics['roc_auc']:.4f}")
-        
-        # Feature importance for interpretation
-        if feature_names is not None and len(feature_names) == X_test.shape[1]:
-            importance = pd.DataFrame({
-                'feature': feature_names,
-                'importance': model.feature_importances_
-            })
-            importance = importance.sort_values('importance', ascending=False)
-            metrics['feature_importance'] = importance.to_dict('records')
+        try:
+            search.fit(X_train, y_train)
+            self.model = search.best_estimator_
+            logger.info(f"Search complete. Best Params: {search.best_params_}, Best Score ({scoring}): {search.best_score_:.4f}")
             
-            # Log top features
-            top_features = importance.head(10).to_string(index=False)
-            logger.info(f"Top 10 features by importance:\n{top_features}")
-        
-        return metrics
-    
-    except Exception as e:
-        logger.error(f"Error evaluating model: {str(e)}")
-        return {}
+            # Optional: Evaluate on validation set if provided
+            if X_val is not None and y_val is not None:
+                val_preds = self.model.predict(X_val)
+                val_acc = accuracy_score(y_val, val_preds)
+                logger.info(f"Validation Accuracy with best model: {val_acc:.4f}")
+                
+        except Exception as e:
+            logger.exception(f"Error during hyperparameter search for RandomForest: {e}")
+            logger.warning("Search failed. Fitting RandomForest with default parameters.")
+            try:
+                 # Fallback to default RF
+                 default_rf = RandomForestClassifier(random_state=42, n_estimators=100, class_weight='balanced') 
+                 default_rf.fit(X_train, y_train)
+                 self.model = default_rf
+            except Exception as e_default:
+                 logger.exception(f"Failed to fit even the default RandomForest: {e_default}")
+                 raise
 
-def plot_roc_curve(model, X_test, y_test, output_path=None):
-    """
-    Plot ROC curve for a binary Random Forest model.
-    
-    Args:
-        model (RandomForestClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The ROC curve figure.
-    """
-    if len(model.classes_) != 2:
-        logger.error("ROC curve can only be plotted for binary classification")
-        return None
-    
-    try:
-        from sklearn.metrics import roc_curve, auc
-        
-        # Get predicted probabilities
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
-        
-        # Calculate ROC curve
-        fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-        roc_auc = auc(fpr, tpr)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
-        ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-        ax.set_xlim([0.0, 1.0])
-        ax.set_ylim([0.0, 1.05])
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('Receiver Operating Characteristic')
-        ax.legend(loc="lower right")
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.savefig(output_path)
-            logger.info(f"ROC curve saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting ROC curve: {str(e)}")
-        return None
+        if self.model is None:
+             logger.error("RandomForest model fitting failed.")
+             raise RuntimeError("Model could not be trained.")
+             
+        return self
 
-def plot_confusion_matrix(model, X_test, y_test, output_path=None):
-    """
-    Plot confusion matrix for a Random Forest model.
-    
-    Args:
-        model (RandomForestClassifier): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        output_path (str, optional): Path to save the plot.
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions. Scaling is not applied."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        # No scaling check needed
         
-    Returns:
-        matplotlib.figure.Figure: The confusion matrix figure.
-    """
-    try:
-        # Make predictions
-        y_pred = model.predict(X_test)
-        
-        # Get confusion matrix
-        cm = confusion_matrix(y_test, y_pred)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-        ax.set_xlabel('Predicted labels')
-        ax.set_ylabel('True labels')
-        ax.set_title('Confusion Matrix')
-        ax.set_xticklabels(model.classes_)
-        ax.set_yticklabels(model.classes_)
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.savefig(output_path)
-            logger.info(f"Confusion matrix saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting confusion matrix: {str(e)}")
-        return None
+        try:
+            predictions = self.model.predict(X)
+            return predictions
+        except Exception as e:
+             logger.exception(f"Error during prediction: {e}")
+             raise
 
-def plot_feature_importance(model, feature_names, top_n=20, output_path=None):
-    """
-    Plot feature importance for a Random Forest model.
-    
-    Args:
-        model (RandomForestClassifier): Trained model.
-        feature_names (list): Names of features.
-        top_n (int, optional): Number of top features to show.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The feature importance figure.
-    """
-    if model is None or feature_names is None:
-        logger.error("Cannot plot feature importance with None inputs")
-        return None
-    
-    try:
-        # Get feature importance
-        importances = model.feature_importances_
-        
-        # Create DataFrame
-        importance_df = pd.DataFrame({
-            'feature': feature_names,
-            'importance': importances
-        })
-        
-        # Sort by importance
-        importance_df = importance_df.sort_values('importance', ascending=False)
-        
-        # Take top N features
-        top_importance = importance_df.head(top_n)
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(12, 10))
-        sns.barplot(x='importance', y='feature', data=top_importance, ax=ax)
-        ax.set_title(f'Top {top_n} Features by Importance')
-        ax.set_xlabel('Importance')
-        
-        # Save the plot if output path is provided
-        if output_path:
+    def predict_proba(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """Predict class probabilities. Scaling is not applied."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        # No scaling check needed
+
+        if not hasattr(self.model, 'predict_proba'): return None # Should always exist for RF
+             
+        try:
+            probabilities = self.model.predict_proba(X)
+            return probabilities
+        except Exception as e:
+             logger.exception(f"Error during probability prediction: {e}")
+             raise
+
+    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """Evaluate the model. Scaling is not applied."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        # No scaling needed
+
+        logger.info(f"Evaluating RandomForest model...")
+        try:
+            # Get predictions & probabilities
+            y_pred = self.model.predict(X_test)
+            y_prob = self.model.predict_proba(X_test) # Get probabilities for all classes
+            
+            # Calculate metrics
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            cm = confusion_matrix(y_test, y_pred)
+            report = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
+            
+            metrics = {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'confusion_matrix': cm,
+                'classification_report': report,
+            }
+            
+            # Add AUC and LogLoss (handle binary vs multi-class)
+            num_classes = len(np.unique(y_test))
+            if num_classes >= 2:
+                try:
+                     if num_classes == 2:
+                          # Use probability of the positive class (assuming classes are 0, 1)
+                          positive_class_idx = np.where(self.model.classes_ == np.max(y_test))[0][0]
+                          roc_auc = roc_auc_score(y_test, y_prob[:, positive_class_idx])
+                          metrics['roc_auc'] = roc_auc
+                     else: # Multi-class
+                          roc_auc_ovr = roc_auc_score(y_test, y_prob, multi_class='ovr', average='weighted')
+                          metrics['roc_auc_ovr'] = roc_auc_ovr
+                     
+                     # Calculate log loss
+                     logloss = log_loss(y_test, y_prob)
+                     metrics['log_loss'] = logloss
+                except ValueError as auc_err:
+                     logger.warning(f"Could not calculate ROC AUC or LogLoss: {auc_err}") 
+            
+            logger.info(f"Evaluation complete. Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            if 'roc_auc' in metrics: logger.info(f" ROC AUC: {metrics['roc_auc']:.4f}")
+            elif 'roc_auc_ovr' in metrics: logger.info(f" ROC AUC (OvR): {metrics['roc_auc_ovr']:.4f}")
+                
+            return metrics
+        except Exception as e:
+            logger.exception(f"Error during evaluation: {e}")
+            return {"error": str(e)}
+            
+    def plot_feature_importance(self, feature_names: List[str], output_path: str):
+        """Plot feature importances for the RandomForest model."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        if not hasattr(self.model, 'feature_importances_'):
+             logger.error("Model does not have feature_importances_ attribute.")
+             return
+            
+        try:
+            importances = self.model.feature_importances_
+            if len(importances) != len(feature_names):
+                 logger.error(f"Mismatch between number of importances ({len(importances)}) and feature names ({len(feature_names)}). Using indices instead.")
+                 feature_names_plot = [f"Feature {i}" for i in range(len(importances))]
+            else:
+                feature_names_plot = feature_names
+                
+            # Create dataframe
+            importance_df = pd.DataFrame({'feature': feature_names_plot, 'importance': importances})
+            importance_df = importance_df.sort_values('importance', ascending=False)
+            
+            # Plot top N features
+            top_n = min(20, len(importance_df))
+            plt.figure(figsize=(10, top_n / 2.5))
+            plt.barh(importance_df['feature'][:top_n], importance_df['importance'][:top_n])
+            plt.xlabel("Feature Importance (Gini Importance)")
+            plt.ylabel("Feature")
+            plt.title(f"Top {top_n} Feature Importances (Random Forest)")
+            plt.gca().invert_yaxis()
             plt.tight_layout()
+            
             plt.savefig(output_path)
-            logger.info(f"Feature importance plot saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting feature importance: {str(e)}")
-        return None
-
-def plot_tree(model, feature_names, class_names=None, tree_index=0, max_depth=3, output_path=None):
-    """
-    Plot a decision tree from the Random Forest.
-    
-    Args:
-        model (RandomForestClassifier): Trained model.
-        feature_names (list): Names of features.
-        class_names (list, optional): Names of classes.
-        tree_index (int, optional): Index of tree to plot.
-        max_depth (int, optional): Maximum depth to display.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The decision tree figure.
-    """
-    if model is None or feature_names is None:
-        logger.error("Cannot plot tree with None inputs")
-        return None
-    
-    try:
-        from sklearn.tree import plot_tree
-        
-        # Select a tree from the forest
-        tree_to_plot = model.estimators_[tree_index]
-        
-        # Plot the tree
-        fig, ax = plt.subplots(figsize=(20, 15))
-        plot_tree(
-            tree_to_plot,
-            max_depth=max_depth,
-            feature_names=feature_names,
-            class_names=class_names,
-            filled=True,
-            rounded=True,
-            ax=ax
-        )
-        ax.set_title(f"Decision Tree #{tree_index} from Random Forest")
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.tight_layout()
-            plt.savefig(output_path)
-            logger.info(f"Decision tree plot saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting decision tree: {str(e)}")
-        return None 
+            plt.close()
+            logger.info(f"Saved feature importance plot to {output_path}")
+            
+        except Exception as e:
+             logger.exception(f"Error plotting feature importance: {e}") 

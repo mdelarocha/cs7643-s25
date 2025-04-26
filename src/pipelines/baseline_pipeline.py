@@ -10,675 +10,466 @@ import matplotlib.pyplot as plt
 import datetime
 import pickle
 import json
+from typing import List, Dict, Optional, Tuple, Union, Any, Type
 
 from src.utils.dataloader import load_oasis_metadata, create_dataset_from_metadata
-from src.utils.train_test_split import split_data_by_subject
-from src.features.statistical import extract_statistical_features, extract_statistical_features_batch, dict_list_to_array
-from src.features.textural import extract_textural_features, extract_textural_features_batch
-from src.features.dimensionality_reduction import (
-    feature_selection_pipeline, 
-    pca_reduction, 
-    get_combined_feature_importance,
-    select_features_from_combined
-)
+from src.utils.train_test_split import split_data_by_subject, split_data_by_range, create_stratified_split
+from src.features.statistical import extract_statistical_features_batch, dict_list_to_array
+from src.features.textural import extract_textural_features_batch
+from src.features.core import extract_features
+from src.features.dimensionality_reduction import select_top_k_features_combined
+from src.utils.preprocessing import preprocess_features
+from src.utils.helpers import convert_numpy_types
+from src.utils.io import save_pipeline_artifacts, load_pipeline_artifacts
 
-from src.models.baseline.logistic_regression import (
-    train_logistic_regression, 
-    evaluate_model as evaluate_logistic_regression,
-    standardize_features as standardize_features_lr,
-    plot_feature_importance as plot_feature_importance_lr
-)
-from src.models.baseline.random_forest import (
-    train_random_forest,
-    evaluate_model as evaluate_random_forest,
-    plot_feature_importance as plot_feature_importance_rf
-)
-from src.models.baseline.svm import (
-    train_svm,
-    evaluate_model as evaluate_svm,
-    standardize_features as standardize_features_svm
-)
-from src.models.baseline.knn import (
-    train_knn,
-    evaluate_model as evaluate_knn,
-    standardize_features as standardize_features_knn,
-    find_optimal_k
-)
-from src.models.baseline.kmeans import (
-    train_kmeans,
-    assign_cluster_labels,
-    evaluate_clustering_as_classifier,
-    plot_clusters
-)
+from src.models.base_model import BaseModel
+from src.models.baseline.logistic_regression import LogisticRegressionModel
+from src.models.baseline.random_forest import RandomForestModel
+from src.models.baseline.svm import SVMModel
+from src.models.baseline.knn import KNNModel
+from src.models.baseline.kmeans import KMeansModel
 
 logger = logging.getLogger(__name__)
 
-def preprocess_features(X, feature_names=None):
-    """
-    Preprocess feature matrix to handle NaN and infinite values.
-    
-    Args:
-        X (numpy.ndarray): Feature matrix.
-        feature_names (list, optional): Names of features for logging.
-        
-    Returns:
-        numpy.ndarray: Preprocessed feature matrix.
-    """
-    if X is None or X.size == 0:
-        logger.error("Cannot preprocess empty feature matrix")
-        return None
-    
-    try:
-        # Check for NaN or infinite values
-        nan_mask = np.isnan(X)
-        inf_mask = np.isinf(X)
-        problem_mask = nan_mask | inf_mask
-        
-        if np.any(problem_mask):
-            # Count problematic features and samples
-            nan_counts_per_feature = np.sum(nan_mask, axis=0)
-            inf_counts_per_feature = np.sum(inf_mask, axis=0)
-            
-            # Log information about problematic features
-            total_problems = np.sum(problem_mask)
-            logger.warning(f"Found {total_problems} problematic values ({np.sum(nan_mask)} NaN, {np.sum(inf_mask)} infinite)")
-            
-            # Log specific features with problems if feature names are provided
-            if feature_names is not None:
-                for i, (nan_count, inf_count) in enumerate(zip(nan_counts_per_feature, inf_counts_per_feature)):
-                    if nan_count > 0 or inf_count > 0:
-                        feature_name = feature_names[i] if i < len(feature_names) else f"Feature_{i}"
-                        logger.warning(f"Feature '{feature_name}': {nan_count} NaN, {inf_count} infinite values")
-            
-            # Replace NaN and infinite values with feature means (computed from non-NaN values)
-            X_clean = X.copy()
-            
-            for col in range(X.shape[1]):
-                col_data = X[:, col]
-                problem_indices = np.where(np.isnan(col_data) | np.isinf(col_data))[0]
-                
-                if len(problem_indices) < len(col_data):  # Only if some values are valid
-                    # Compute mean from valid values
-                    valid_indices = np.where(~(np.isnan(col_data) | np.isinf(col_data)))[0]
-                    col_mean = np.mean(col_data[valid_indices])
-                    
-                    # Replace problematic values with mean
-                    X_clean[problem_indices, col] = col_mean
-                else:
-                    # If all values are problematic, use zero
-                    X_clean[:, col] = 0
-                    logger.warning(f"Feature at index {col} has all NaN/infinite values; replacing with zeros")
-            
-            logger.info("Successfully replaced NaN and infinite values in feature matrix")
-            return X_clean
-        else:
-            logger.info("No NaN or infinite values found in feature matrix")
-            return X
-    
-    except Exception as e:
-        logger.error(f"Error preprocessing features: {str(e)}")
-        return X
+# --- Model Registry --- 
+# Maps string names to model classes for easier instantiation
+MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
+    'logistic_regression': LogisticRegressionModel,
+    'random_forest': RandomForestModel,
+    'svm': SVMModel,
+    'knn': KNNModel,
+    'kmeans': KMeansModel
+}
 
-def extract_features(volumes, feature_types=None):
+def select_best_features(X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray,
+                         feature_names: List[str], n_features: int = 50, methods: Optional[List[str]] = None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[List[str]], Optional[pd.DataFrame]]:
     """
-    Extract features from MRI volumes.
-    
-    Args:
-        volumes (list): List of MRI volumes.
-        feature_types (list, optional): List of feature types to extract.
-        
-    Returns:
-        tuple: (X, feature_names) - Feature matrix and feature names.
-    """
-    if volumes is None or len(volumes) == 0:
-        logger.error("No volumes provided for feature extraction")
-        return None, None
-    
-    if feature_types is None:
-        feature_types = ['statistical', 'textural']
-    
-    try:
-        all_features = []
-        all_feature_names = []
-        
-        # Extract features by type
-        if 'statistical' in feature_types:
-            logger.info("Extracting statistical features...")
-            statistical_features = extract_statistical_features_batch(volumes)
-            if statistical_features and len(statistical_features) > 0:
-                X_stat, feat_names_stat = dict_list_to_array(statistical_features)
-                if X_stat is not None and X_stat.size > 0:
-                    all_features.append(X_stat)
-                    all_feature_names.extend(feat_names_stat)
-        
-        if 'textural' in feature_types:
-            logger.info("Extracting textural features...")
-            textural_features = extract_textural_features_batch(volumes)
-            if textural_features and len(textural_features) > 0:
-                X_text, feat_names_text = dict_list_to_array(textural_features)
-                if X_text is not None and X_text.size > 0:
-                    all_features.append(X_text)
-                    all_feature_names.extend(feat_names_text)
-        
-        # Combine features
-        if len(all_features) > 0:
-            X = np.hstack(all_features)
-            logger.info(f"Extracted {X.shape[1]} features in total")
-            return X, all_feature_names
-        else:
-            logger.error("No features were extracted")
-            return None, None
-    
-    except Exception as e:
-        logger.error(f"Error extracting features: {str(e)}")
-        return None, None
-
-def select_best_features(X_train, y_train, X_test, feature_names, n_features=50, methods=None):
-    """
-    Select the best features using multiple selection methods.
+    Select the best features using multiple selection methods. Returns original arrays if selection fails.
     
     Args:
         X_train (numpy.ndarray): Training features.
         y_train (numpy.ndarray): Training labels.
         X_test (numpy.ndarray): Test features.
         feature_names (list): List of feature names.
-        n_features (int, optional): Number of features to select.
-        methods (list, optional): List of feature selection methods.
+        n_features (int): Number of features to select.
+        methods (list, optional): List of feature selection methods. Defaults ['f_classif', 'random_forest'].
         
     Returns:
         tuple: (X_train_selected, X_test_selected, selected_feature_names, importance_df) - Selected features and names.
+               Returns original X_train, X_test, feature_names, None if selection fails.
     """
     if X_train is None or y_train is None or X_test is None or not feature_names:
         logger.error("Cannot select features with None inputs")
-        return None, None, None, None
+        return X_train, X_test, feature_names, None
+    
+    if n_features <= 0 or n_features >= X_train.shape[1]:
+        logger.info(f"Skipping feature selection: n_features ({n_features}) is invalid or >= total features ({X_train.shape[1]})")
+        return X_train, X_test, feature_names, None
     
     if methods is None:
-        methods = ['f_classif', 'mutual_info', 'random_forest', 'logistic_l1']
+        methods = ['f_classif', 'random_forest']
     
     try:
-        # Run feature selection pipeline
+        logger.info(f"Running feature selection pipeline with methods: {methods}, selecting top {n_features} features.")
         results = feature_selection_pipeline(X_train, y_train, feature_names, methods, n_features)
         
-        # If no results were obtained, return the original features
-        if not results or 'methods' not in results or len(results['methods']) == 0:
-            logger.warning("No feature selection results were obtained. Using all features.")
+        if not results or 'methods' not in results or not results['methods']:
+            logger.warning("Feature selection pipeline did not return valid results. Using all features.")
             return X_train, X_test, feature_names, None
         
-        # Get combined feature importance
         importance_df = get_combined_feature_importance(results, top_k=n_features)
         
-        # If importance_df is empty or None, return original features
-        if importance_df is None or len(importance_df) == 0:
-            logger.warning("No feature importance data was obtained. Using all features.")
+        if importance_df is None or importance_df.empty:
+            logger.warning("Could not obtain combined feature importance. Using all features.")
             return X_train, X_test, feature_names, None
         
-        # Get top features
-        top_features = importance_df.index.tolist()[:min(n_features, len(importance_df))]
+        top_features = importance_df.index.tolist()[:n_features]
         
-        # If no top features were found, return original features
         if not top_features:
-            logger.warning("No top features were identified. Using all features.")
+            logger.warning("No top features identified from importance data. Using all features.")
             return X_train, X_test, feature_names, importance_df
         
-        # Select features
         X_train_selected, selected_indices = select_features_from_combined(X_train, feature_names, top_features)
         X_test_selected, _ = select_features_from_combined(X_test, feature_names, top_features)
         
-        # If selection failed, return original features
-        if X_train_selected is None or X_test_selected is None or not selected_indices:
-            logger.warning("Feature selection failed. Using all features.")
+        if X_train_selected is None or X_test_selected is None:
+            logger.warning("Feature selection failed during application (select_features_from_combined). Using all features.")
             return X_train, X_test, feature_names, importance_df
         
-        # Get names of selected features
-        selected_feature_names = [feature_names[i] for i in selected_indices]
+        # Ensure selected features have correct shape (2D)
+        if X_train_selected.ndim == 1: X_train_selected = X_train_selected.reshape(-1, 1)
+        if X_test_selected.ndim == 1: X_test_selected = X_test_selected.reshape(-1, 1)
         
-        logger.info(f"Selected {len(selected_feature_names)} best features")
+        # Check number of selected features matches expected
+        if X_train_selected.shape[1] != len(top_features) or X_test_selected.shape[1] != len(top_features):
+            logger.warning(f"Selected feature count mismatch. Expected {len(top_features)}, got Train:{X_train_selected.shape[1]}, Test:{X_test_selected.shape[1]}. Using all features.")
+            return X_train, X_test, feature_names, importance_df
         
+        selected_feature_names = top_features
+        
+        logger.info(f"Successfully selected {len(selected_feature_names)} features.")
         return X_train_selected, X_test_selected, selected_feature_names, importance_df
     
     except Exception as e:
-        logger.error(f"Error selecting best features: {str(e)}")
+        logger.exception(f"Error selecting best features: {e}")
         return X_train, X_test, feature_names, None
 
-def train_models(X_train, y_train, X_val=None, y_val=None, model_types=None):
+def train_models(X_train: np.ndarray, y_train: np.ndarray,
+                 X_val: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None,
+                 model_types: Optional[List[str]] = None, model_params: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, BaseModel]]:
     """
-    Train multiple baseline models.
+    Train multiple models on the same data using the BaseModel interface.
     
     Args:
-        X_train (numpy.ndarray): Training features.
-        y_train (numpy.ndarray): Training labels.
-        X_val (numpy.ndarray, optional): Validation features.
-        y_val (numpy.ndarray, optional): Validation labels.
-        model_types (list, optional): List of model types to train.
+        X_train: Training features.
+        y_train: Training labels.
+        X_val: Validation features.
+        y_val: Validation labels.
+        model_types: List of model type names (keys in MODEL_REGISTRY).
+        model_params: Optional dictionary mapping model_type to its specific parameters.
         
     Returns:
-        dict: Dictionary of trained models.
+        Dictionary of trained models {model_type: model_instance}. Returns None if fatal error.
     """
     if X_train is None or y_train is None:
-        logger.error("Cannot train models with None inputs")
-        return {}
+        logger.error("Cannot train models with None training data")
+        return None
     
     if model_types is None:
-        model_types = ['logistic_regression', 'random_forest', 'svm', 'knn', 'kmeans']
+        model_types = list(MODEL_REGISTRY.keys()) # Default to all registered models
     
-    models = {}
+    trained_models = {}
     
-    try:
-        # Train logistic regression
-        if 'logistic_regression' in model_types:
-            logger.info("Training logistic regression model...")
-            X_train_scaled, X_val_scaled, _, _ = standardize_features_lr(X_train, X_val)
-            model = train_logistic_regression(X_train_scaled, y_train, C=1.0, penalty='l2')
-            if model is not None:
-                models['logistic_regression'] = {
-                    'model': model,
-                    'scaler': 'standard',
-                    'preprocessed': True
-                }
-        
-        # Train random forest
-        if 'random_forest' in model_types:
-            logger.info("Training random forest model...")
-            model = train_random_forest(X_train, y_train, n_estimators=100, max_depth=None)
-            if model is not None:
-                models['random_forest'] = {
-                    'model': model,
-                    'scaler': None,
-                    'preprocessed': False
-                }
-        
-        # Train SVM
-        if 'svm' in model_types:
-            logger.info("Training SVM model...")
-            X_train_scaled, X_val_scaled, _, _ = standardize_features_svm(X_train, X_val)
-            model = train_svm(X_train_scaled, y_train, C=1.0, kernel='rbf')
-            if model is not None:
-                models['svm'] = {
-                    'model': model,
-                    'scaler': 'standard',
-                    'preprocessed': True
-                }
-        
-        # Train KNN
-        if 'knn' in model_types:
-            logger.info("Training KNN model...")
-            X_train_scaled, X_val_scaled, _, _ = standardize_features_knn(X_train, X_val)
-            
-            # Find optimal k if validation set is provided
-            if X_val is not None and y_val is not None:
-                optimal_k, _, _ = find_optimal_k(X_train_scaled, y_train, X_val_scaled, y_val)
-                if optimal_k is not None:
-                    n_neighbors = optimal_k
-                else:
-                    n_neighbors = 5
-            else:
-                n_neighbors = 5
-            
-            model = train_knn(X_train_scaled, y_train, n_neighbors=n_neighbors)
-            if model is not None:
-                models['knn'] = {
-                    'model': model,
-                    'scaler': 'standard',
-                    'preprocessed': True
-                }
-        
-        # Train KMeans
-        if 'kmeans' in model_types:
-            logger.info("Training KMeans model...")
-            X_train_scaled, X_val_scaled, _, _ = standardize_features_knn(X_train, X_val)
-            
-            # Determine number of clusters based on number of classes
-            n_clusters = len(np.unique(y_train))
-            
-            model = train_kmeans(X_train_scaled, n_clusters=n_clusters)
-            if model is not None:
-                # Assign cluster labels using training data
-                cluster_labels = model.predict(X_train_scaled)
-                cluster_to_class_map, _ = assign_cluster_labels(cluster_labels, y_train)
-                
-                models['kmeans'] = {
-                    'model': model,
-                    'scaler': 'standard',
-                    'preprocessed': True,
-                    'cluster_to_class_map': cluster_to_class_map
-                }
-        
-        logger.info(f"Trained {len(models)} models")
-        return models
-    
-    except Exception as e:
-        logger.error(f"Error training models: {str(e)}")
-        return models
+    for model_type in model_types:
+        if model_type not in MODEL_REGISTRY:
+            logger.warning(f"Model type '{model_type}' not found in registry. Skipping.")
+            continue
 
-def evaluate_models(models, X_test, y_test, feature_names=None, output_dir=None):
+        logger.info(f"Training {model_type} model...")
+        ModelClass = MODEL_REGISTRY[model_type]
+        
+        # Get specific parameters for this model type, if provided
+        params = model_params.get(model_type, {}) if model_params else {}
+
+        try:
+            model_instance = ModelClass(**params)
+            # Pass validation data if available
+            model_instance.fit(X_train, y_train, X_val=X_val, y_val=y_val)
+            trained_models[model_type] = model_instance
+            logger.info(f"Successfully trained {model_type}.")
+            
+        except Exception as e:
+            logger.error(f"Failed to train {model_type}: {e}", exc_info=True) # Log traceback
+
+    if not trained_models:
+         logger.error("No models were successfully trained.")
+         return None
+         
+    logger.info(f"Attempted training for {len(model_types)} model types. Successfully trained: {list(trained_models.keys())}")
+    # The returned dictionary now contains the *instances* of the BaseModel subclasses
+    return trained_models # Return dict of model instances directly
+
+def evaluate_models(trained_models: Dict[str, BaseModel], X_test: np.ndarray, y_test: np.ndarray,
+                    feature_names: Optional[List[str]] = None, output_dir: Optional[str] = None) -> Optional[Dict[str, Dict]]:
     """
-    Evaluate multiple trained models.
+    Evaluate all trained models (BaseModel instances) on test data.
     
     Args:
-        models (dict): Dictionary of trained models.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        feature_names (list, optional): Names of features.
-        output_dir (str, optional): Directory to save evaluation results.
+        trained_models: Dictionary containing trained model instances {model_type: model_instance}.
+        X_test: Test features.
+        y_test: Test labels.
+        feature_names: Names of features for plotting importance (if applicable).
+        output_dir: Directory to save evaluation results and plots.
         
     Returns:
-        dict: Dictionary of evaluation metrics for each model.
+        Dictionary of evaluation results {model_type: metrics_dict}. Returns None if fatal error.
     """
-    if not models or X_test is None or y_test is None:
-        logger.error("Cannot evaluate models with None inputs")
-        return {}
+    if not trained_models:
+        logger.error("No valid models provided for evaluation.")
+        return None
+    if X_test is None or y_test is None:
+        logger.error("Cannot evaluate models with None test data.")
+        return None
     
     results = {}
-    
+
     try:
-        # Create output directory if provided
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        
-        # Evaluate each model
-        for model_name, model_info in models.items():
-            logger.info(f"Evaluating {model_name} model...")
-            
-            model = model_info.get('model')
-            if model is None:
-                continue
-            
-            # Preprocess test data if needed
-            X_test_processed = X_test
-            if model_info.get('preprocessed', False):
-                if model_info.get('scaler') == 'standard':
-                    from sklearn.preprocessing import StandardScaler
-                    scaler = StandardScaler()
-                    scaler.fit(X_test)
-                    X_test_processed = scaler.transform(X_test)
-            
-            # Evaluate model based on type
-            if model_name == 'logistic_regression':
-                metrics = evaluate_logistic_regression(model, X_test_processed, y_test, feature_names)
-                
-                # Plot feature importance if feature names are provided
-                if feature_names is not None and output_dir:
-                    fig = plot_feature_importance_lr(model, feature_names)
-                    if fig:
-                        plt.savefig(os.path.join(output_dir, f"{model_name}_feature_importance.png"))
-                        plt.close(fig)
-            
-            elif model_name == 'random_forest':
-                metrics = evaluate_random_forest(model, X_test_processed, y_test, feature_names)
-                
-                # Plot feature importance if feature names are provided
-                if feature_names is not None and output_dir:
-                    fig = plot_feature_importance_rf(model, feature_names)
-                    if fig:
-                        plt.savefig(os.path.join(output_dir, f"{model_name}_feature_importance.png"))
-                        plt.close(fig)
-            
-            elif model_name == 'svm':
-                metrics = evaluate_svm(model, X_test_processed, y_test)
-            
-            elif model_name == 'knn':
-                metrics = evaluate_knn(model, X_test_processed, y_test)
-            
-            elif model_name == 'kmeans':
-                cluster_to_class_map = model_info.get('cluster_to_class_map')
-                if cluster_to_class_map:
-                    metrics = evaluate_clustering_as_classifier(model, X_test_processed, y_test, cluster_to_class_map)
-                    
-                    # Plot clusters if output directory is provided
-                    if output_dir:
-                        fig = plot_clusters(X_test_processed, model, true_labels=y_test)
-                        if fig:
-                            plt.savefig(os.path.join(output_dir, f"{model_name}_clusters.png"))
-                            plt.close(fig)
-                else:
-                    metrics = {}
-            
-            else:
-                metrics = {}
-            
-            # Save results
-            results[model_name] = metrics
-            
-            # Save metrics to file if output directory is provided
-            if output_dir and metrics:
-                metrics_file = os.path.join(output_dir, f"{model_name}_metrics.json")
-                with open(metrics_file, 'w') as f:
-                    # Convert numpy types to Python types for JSON serialization
-                    metrics_json = {}
-                    for key, value in metrics.items():
+        for model_type, model_instance in trained_models.items():
+            logger.info(f"Evaluating {model_type} model...")
+            metrics = None
+
+            try:
+                # Use the evaluate method of the BaseModel instance
+                # The model instance itself handles any necessary preprocessing like scaling
+                metrics = model_instance.evaluate(X_test, y_test)
+
+                # 2. Call plotting method if it exists and output_dir is provided
+                if output_dir and hasattr(model_instance, 'plot_feature_importance') and callable(getattr(model_instance, 'plot_feature_importance')):
+                    if feature_names:
+                        try:
+                            plot_path = os.path.join(output_dir, f"{model_type}_feature_importance.png")
+                            model_instance.plot_feature_importance(feature_names, plot_path)
+                        except Exception as plot_err:
+                            logger.error(f"Failed to plot feature importance for {model_type}: {plot_err}")
+                    else:
+                        logger.warning(f"Cannot plot feature importance for {model_type}: feature_names not provided.")
+
+                # 3. Call confusion matrix plotting method if it exists (should exist for classifiers)
+                if output_dir and hasattr(model_instance, 'plot_confusion_matrix') and callable(getattr(model_instance, 'plot_confusion_matrix')):
+                    # Define class labels based on your dataset (modify as needed)
+                    # Example assumes binary classification 0: Non-demented, 1: Demented (if combine_cdr=True)
+                    # Or 0: Non, 1: Very Mild, 2: Mild (if combine_cdr=False)
+                    # This part might need adjustment based on the actual labels used.
+                    # Let's try fetching from the model if possible, otherwise default
+                    class_labels = None 
+                    if hasattr(model_instance.model, 'classes_'):
+                        try: 
+                            # Attempt to map numeric classes to meaningful names
+                            class_mapping = {0: 'nondemented', 1: 'very mild dementia', 2: 'mild dementia'} # Adjust if combine_cdr changes this
+                            class_labels = [class_mapping.get(c, str(c)) for c in model_instance.model.classes_]
+                        except Exception as label_err:
+                            logger.warning(f"Could not automatically map class labels for {model_type}: {label_err}")
+
+                    try:
+                        cm_plot_path = os.path.join(output_dir, f"{model_type}_confusion_matrix.png")
+                        model_instance.plot_confusion_matrix(X_test, y_test, cm_plot_path, class_labels=class_labels)
+                    except Exception as plot_err:
+                        logger.error(f"Failed to plot confusion matrix for {model_type}: {plot_err}")
+
+                # 4. Add other potential plots here (e.g., plot_clusters for KMeans)
+                if output_dir and model_type == 'kmeans' and hasattr(model_instance, 'plot_clusters') and callable(getattr(model_instance, 'plot_clusters')):
+                    try:
+                        cluster_plot_path = os.path.join(output_dir, f"{model_type}_clusters.png")
+                        # Pass y_test to plot_clusters if it can use true labels for coloring
+                        model_instance.plot_clusters(X_test, y_test, cluster_plot_path)
+                    except Exception as plot_err:
+                        logger.error(f"Failed to plot clusters for {model_type}: {plot_err}")
+
+                # Store and log metrics
+                if metrics:
+                    results[model_type] = metrics
+                    logger.info(f"--- {model_type} Evaluation Metrics ---")
+                    for name, value in metrics.items():
                         if isinstance(value, np.ndarray):
-                            metrics_json[key] = value.tolist()
-                        elif isinstance(value, np.integer):
-                            metrics_json[key] = int(value)
-                        elif isinstance(value, np.floating):
-                            metrics_json[key] = float(value)
+                            logger.info(f"  {name}: \\n{value}")
                         else:
-                            metrics_json[key] = value
-                    
-                    json.dump(metrics_json, f, indent=2)
+                            try:
+                                # Use .4f for floats, otherwise just print the value
+                                logger.info(f"  {name}: {value:.4f}" if isinstance(value, (float, np.floating)) else f"  {name}: {value}")
+                            except TypeError: # Handle cases where value is not easily formatted (e.g., complex objects)
+                                logger.info(f"  {name}: {value}")
+                    logger.info("-" * (len(model_type) + 28)) # Separator line
+                else:
+                    logger.warning(f"Evaluation failed or returned no metrics for {model_type}.")
+
+            except Exception as eval_exc:
+                logger.error(f"Error evaluating model {model_type}: {eval_exc}", exc_info=True)
+                results[model_type] = {"error": str(eval_exc)}
+
+        # Save Overall Metrics
+        if output_dir and results:
+            # Filter out error entries before saving
+            valid_results = {k: v for k, v in results.items() if 'error' not in v}
+            if valid_results:
+                metrics_path_json = os.path.join(output_dir, "evaluation_metrics.json")
+                try:
+                    with open(metrics_path_json, 'w') as f:
+                        json.dump(valid_results, f, indent=4, default=convert_numpy_types)
+                    logger.info(f"Saved combined evaluation metrics to {metrics_path_json}")
+                except Exception as json_exc:
+                    logger.error(f"Error saving evaluation metrics to JSON: {json_exc}")
+            else:
+                logger.warning("No valid evaluation results to save.")
         
-        logger.info(f"Evaluated {len(results)} models")
-        return results
+        return results # Return the dictionary including any error entries
     
     except Exception as e:
-        logger.error(f"Error evaluating models: {str(e)}")
-        return results
+        logger.exception(f"Critical error during model evaluation process: {e}")
+        return None
 
-def save_models(models, output_dir):
+def run_baseline_pipeline(
+    metadata_path: str,
+    data_dir: str,
+    output_dir: str,
+    model_types: List[str],
+    feature_types: List[str],
+    split_strategy: str = 'subject',
+    test_size: float = 0.2,
+    val_size: float = 0.1,
+    train_range: Optional[Tuple[int, int]] = None,
+    n_features: Optional[int] = 50,
+    combine_cdr: bool = True,
+    random_state: int = 42,
+    model_params: Optional[Dict[str, Dict[str, Any]]] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Dict]]]:
     """
-    Save trained models to files.
+    Run the consolidated end-to-end baseline model pipeline.
     
     Args:
-        models (dict): Dictionary of trained models.
-        output_dir (str): Directory to save models.
+        metadata_path: Path to metadata CSV.
+        data_dir: Directory containing MRI files.
+        output_dir: Base directory to save results (timestamped subdir created).
+        model_types: List of model types to train.
+        feature_types: List of feature types to extract.
+        split_strategy: Method for splitting data ('stratified', 'subject', 'range').
+        test_size: Proportion for test set (used if strategy is not 'range').
+        val_size: Proportion for validation set (used if strategy is not 'range').
+        train_range: Tuple (start_idx, end_idx) for 'range' split strategy.
+        n_features: Number of features to select (<=0 or None disables selection).
+        combine_cdr: Whether to combine CDR scores 1 and 2.
+        random_state: Seed for random operations.
+        model_params: Optional dictionary mapping model_type name to its specific configuration dict.
         
     Returns:
-        bool: True if successful, False otherwise.
+        tuple: (trained_data, evaluation_results)
+               trained_data = {'models': {...}, 'scalers': {...}}
+               evaluation_results = {model_type: metrics_dict}
     """
-    if not models or not output_dir:
-        logger.error("Cannot save models with None inputs")
-        return False
-    
-    try:
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Save each model
-        for model_name, model_info in models.items():
-            model = model_info.get('model')
-            if model is None:
-                continue
-            
-            # Create model file path
-            model_file = os.path.join(output_dir, f"{model_name}.pkl")
-            
-            # Save model
-            with open(model_file, 'wb') as f:
-                pickle.dump(model_info, f)
-            
-            logger.info(f"Saved {model_name} model to {model_file}")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error saving models: {str(e)}")
-        return False
+    start_time = datetime.datetime.now()
+    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
+    run_output_dir = os.path.join(output_dir, f"baseline_run_{timestamp}")
+    os.makedirs(run_output_dir, exist_ok=True)
+    logger.info(f"Starting baseline pipeline run. Output directory: {run_output_dir}")
+    logger.info(f"Run parameters: models={model_types}, features={feature_types}, split={split_strategy}, "
+                f"test_size={test_size}, val_size={val_size}, train_range={train_range}, "
+                f"n_features={n_features}, combine_cdr={combine_cdr}, split_strategy={split_strategy}")
 
-def load_models(input_dir):
-    """
-    Load trained models from files.
-    
-    Args:
-        input_dir (str): Directory containing saved models.
-        
-    Returns:
-        dict: Dictionary of loaded models.
-    """
-    if not input_dir:
-        logger.error("Cannot load models with None input directory")
-        return {}
-    
-    models = {}
-    
-    try:
-        # Check if directory exists
-        if not os.path.isdir(input_dir):
-            logger.error(f"Directory {input_dir} does not exist")
-            return {}
-        
-        # List model files
-        model_files = [f for f in os.listdir(input_dir) if f.endswith('.pkl')]
-        
-        # Load each model
-        for model_file in model_files:
-            model_path = os.path.join(input_dir, model_file)
-            model_name = os.path.splitext(model_file)[0]
-            
-            with open(model_path, 'rb') as f:
-                model_info = pickle.load(f)
-            
-            models[model_name] = model_info
-            logger.info(f"Loaded {model_name} model from {model_path}")
-        
-        return models
-    
-    except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
-        return models
+    trained_data = None
+    results = None
 
-def run_baseline_pipeline(metadata_path, data_dir, model_types=None, feature_types=None, 
-                         output_dir=None, test_size=0.2, val_size=0.1, n_features=50):
-    """
-    Run an end-to-end baseline model pipeline.
-    
-    Args:
-        metadata_path (str): Path to the metadata CSV file.
-        data_dir (str): Directory containing MRI files.
-        model_types (list, optional): List of model types to train.
-        feature_types (list, optional): List of feature types to extract.
-        output_dir (str, optional): Directory to save results.
-        test_size (float, optional): Proportion of data for testing.
-        val_size (float, optional): Proportion of data for validation.
-        n_features (int, optional): Number of features to select.
-        
-    Returns:
-        tuple: (models, results) - Trained models and evaluation results.
-    """
-    # Set default values
-    if model_types is None:
-        model_types = ['logistic_regression', 'random_forest', 'svm', 'knn', 'kmeans']
-    
-    if feature_types is None:
-        feature_types = ['statistical', 'textural']
-    
-    # Create output directory with timestamp
-    if output_dir:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(output_dir, f"baseline_pipeline_{timestamp}")
-        os.makedirs(output_dir, exist_ok=True)
-    
     try:
-        # Load metadata
-        logger.info("Loading metadata...")
-        metadata = load_oasis_metadata(metadata_path)
-        if metadata is None:
-            return None, None
-        
-        # Split data
-        logger.info("Splitting data...")
-        train_df, val_df, test_df = split_data_by_subject(metadata, test_size=test_size, val_size=val_size)
-        
-        # Create datasets
-        logger.info("Creating dataset from metadata...")
-        X_train_raw, y_train = create_dataset_from_metadata(train_df, data_dir)
-        X_val_raw, y_val = create_dataset_from_metadata(val_df, data_dir) if val_df is not None else (None, None)
-        X_test_raw, y_test = create_dataset_from_metadata(test_df, data_dir)
-        
-        # Extract features
-        logger.info("Extracting features...")
-        X_train, feature_names = extract_features(X_train_raw, feature_types)
-        X_val, _ = extract_features(X_val_raw, feature_types) if X_val_raw is not None else (None, None)
-        X_test, _ = extract_features(X_test_raw, feature_types)
-        
-        if X_train is None or X_test is None:
-            return None, None
-            
-        # Preprocess features to handle NaN values
-        logger.info("Preprocessing features to handle NaN values...")
-        X_train = preprocess_features(X_train, feature_names)
-        X_val = preprocess_features(X_val) if X_val is not None else None
-        X_test = preprocess_features(X_test)
-        
-        if X_train is None or X_test is None:
-            logger.error("Feature preprocessing failed")
-            return None, None
-        
-        # Select best features
-        logger.info("Selecting best features...")
-        X_train_selected, X_test_selected, selected_feature_names, importance_df = select_best_features(
-            X_train, y_train, X_test, feature_names, n_features=n_features
-        )
-        
-        if X_val is not None:
-            # Apply same feature selection to validation set
-            _, X_val_selected = select_features_from_combined(X_val, feature_names, selected_feature_names)
+        logger.info(f"Loading metadata from: {metadata_path}")
+        metadata_df = load_oasis_metadata(metadata_path, combine_cdr=combine_cdr)
+        if metadata_df is None or metadata_df.empty:
+            raise ValueError("Failed to load metadata or metadata is empty.")
+        logger.info(f"Metadata loaded successfully. Shape: {metadata_df.shape}")
+
+        label_column = 'CDR_Combined' if combine_cdr else 'CDR'
+        if label_column not in metadata_df.columns:
+            raise ValueError(f"Required label column '{label_column}' not found in metadata after loading.")
+
+        logger.info(f"Splitting data using strategy: {split_strategy}")
+        train_df, val_df, test_df = None, None, None
+
+        if split_strategy == 'range':
+            if train_range is None or len(train_range) != 2:
+                raise ValueError("train_range (start, end) must be provided for 'range' split strategy.")
+            train_start_idx, train_end_idx = train_range
+            train_df, val_df, test_df = split_data_by_range(
+                metadata_df, train_start_idx, train_end_idx, test_size, val_size
+            )
+            logger.info(f"Range split: Train indices {train_start_idx}-{train_end_idx}, Test size {test_size}, Val size {val_size}")
+
+        elif split_strategy == 'stratified':
+            logger.info(f"Attempting stratified split by '{label_column}'. Test size: {test_size}, Val size: {val_size}")
+            min_samples_per_class = metadata_df[label_column].value_counts().min()
+            required_samples = 2
+            if val_size > 0 and (1-test_size-val_size) > 0 : required_samples = 3
+            elif val_size > 0 or test_size > 0: required_samples = 2
+
+            if min_samples_per_class < required_samples:
+                logger.warning(f"Minimum samples per class ({min_samples_per_class}) is less than required ({required_samples}) for stratification on '{label_column}'. Falling back to 'subject' split.")
+                split_strategy = 'subject'
+            else:
+                try:
+                    train_df, val_df, test_df = create_stratified_split(
+                        metadata_df, label_column, test_size, val_size, random_state=random_state
+                    )
+                    logger.info("Stratified split successful.")
+                except Exception as strat_err:
+                    logger.warning(f"Stratified split failed ({strat_err}). Falling back to 'subject' split.")
+                    split_strategy = 'subject'
+
+        if split_strategy == 'subject':
+            logger.info(f"Splitting data by subject (default or fallback). Test size: {test_size}, Val size: {val_size}")
+            train_df, val_df, test_df = split_data_by_subject(
+                metadata_df, test_size, val_size, random_state=random_state
+            )
+
+        if train_df is None or train_df.empty or test_df is None or test_df.empty:
+            raise ValueError("Data splitting resulted in empty train or test set.")
+        logger.info(f"Data split sizes: Train={len(train_df)}, Validation={len(val_df) if val_df is not None else 0}, Test={len(test_df)}")
+
+        logger.info("Creating datasets (loading MRI volumes)...")
+        X_train_raw, y_train = create_dataset_from_metadata(train_df, data_dir, label_col=label_column)
+        X_val_raw, y_val = create_dataset_from_metadata(val_df, data_dir, label_col=label_column) if val_df is not None else (None, None)
+        X_test_raw, y_test = create_dataset_from_metadata(test_df, data_dir, label_col=label_column)
+
+        if X_train_raw is None or y_train is None or X_test_raw is None or y_test is None:
+            raise ValueError("Failed to create datasets (load MRI volumes). Check paths and metadata linkage.")
+        logger.info("MRI volumes loaded.")
+
+        logger.info(f"Extracting features: {feature_types}")
+        X_train_feat, feature_names = extract_features(X_train_raw, feature_types)
+        X_val_feat, _ = extract_features(X_val_raw, feature_types) if X_val_raw else (None, None)
+        X_test_feat, _ = extract_features(X_test_raw, feature_types)
+
+        if X_train_feat is None or feature_names is None or X_test_feat is None:
+            raise ValueError("Feature extraction failed for train or test set.")
+        logger.info(f"Feature extraction complete. Shape: {X_train_feat.shape}")
+
+        logger.info("Preprocessing features (handling NaN/Inf)...")
+        X_train_proc = preprocess_features(X_train_feat, feature_names)
+        X_val_proc = preprocess_features(X_val_feat, feature_names) if X_val_feat is not None else None
+        X_test_proc = preprocess_features(X_test_feat, feature_names)
+
+        if X_train_proc is None or X_test_proc is None:
+            raise ValueError("Feature preprocessing (NaN/Inf handling) failed.")
+        logger.info("Feature preprocessing complete.")
+
+        X_train_final, X_test_final = X_train_proc, X_test_proc
+        X_val_final = X_val_proc
+        current_feature_names = feature_names
+        importance_df = None
+
+        if n_features is not None and n_features > 0 and n_features < X_train_proc.shape[1]:
+            logger.info(f"Selecting top {n_features} features...")
+            X_train_final, X_test_final, X_val_final, current_feature_names, importance_df = select_top_k_features_combined(
+                X_train_proc, y_train, X_test_proc, X_val_proc, feature_names, n_features=n_features
+            )
+
+            if importance_df is not None and not importance_df.empty:
+                importance_path = os.path.join(run_output_dir, "feature_importance.csv")
+                try:
+                    importance_df.to_csv(importance_path)
+                    logger.info(f"Saved feature importance scores to {importance_path}")
+                except Exception as imp_save_err:
+                    logger.error(f"Failed to save feature importance: {imp_save_err}")
         else:
-            X_val_selected = None
-        
-        # Save feature importance if output directory is provided
-        if output_dir and importance_df is not None:
-            importance_df.to_csv(os.path.join(output_dir, "feature_importance.csv"))
-        
-        # Train models
-        logger.info("Training models...")
-        models = train_models(X_train_selected, y_train, X_val_selected, y_val, model_types)
-        
-        # Evaluate models
-        logger.info("Evaluating models...")
-        results = evaluate_models(models, X_test_selected, y_test, selected_feature_names, output_dir)
-        
-        # Save models
-        if output_dir:
-            logger.info("Saving models...")
-            save_models(models, os.path.join(output_dir, "models"))
-        
-        logger.info("Pipeline completed successfully")
-        return models, results
-    
-    except Exception as e:
-        logger.error(f"Error running baseline pipeline: {str(e)}")
-        return None, None
+            logger.info("Skipping feature selection (n_features invalid or not specified). Using all preprocessed features.")
+            # Ensure X_train_final, etc., are still assigned the processed versions
+            X_train_final, X_test_final = X_train_proc, X_test_proc
+            X_val_final = X_val_proc
+            current_feature_names = feature_names
 
-# Create an additional wrapper function that provides a simpler interface
-def run_simple_baseline(metadata_path, data_dir, output_dir, model_types=None, feature_types=None):
-    """
-    A simplified version of the baseline pipeline with reasonable defaults.
-    
-    Args:
-        metadata_path (str): Path to the metadata CSV file.
-        data_dir (str): Directory containing MRI files.
-        output_dir (str): Directory to save results.
-        model_types (list, optional): List of model types to train.
-        feature_types (list, optional): List of feature types to extract.
-        
-    Returns:
-        tuple: (models, results) - Trained models and evaluation results.
-    """
-    # Set default values
-    if model_types is None:
-        model_types = ['logistic_regression', 'random_forest']
-    
-    if feature_types is None:
-        feature_types = ['statistical']
-    
-    # Run the pipeline with reasonable defaults
-    return run_baseline_pipeline(
-        metadata_path=metadata_path,
-        data_dir=data_dir,
-        model_types=model_types,
-        feature_types=feature_types,
-        output_dir=output_dir,
-        test_size=0.2,
-        val_size=0.1,
-        n_features=20
-    ) 
+        logger.info(f"Training models: {model_types}...")
+        # Pass model parameters dictionary
+        trained_data = train_models(X_train_final, y_train, X_val_final, y_val, model_types, model_params)
+        if trained_data is None or not trained_data:
+            raise ValueError("Model training failed or returned no models.")
+        logger.info(f"Models trained: {list(trained_data.keys())}")
+
+        logger.info("Evaluating models on the test set...")
+        # Pass the final selected/processed test features and the correct feature names
+        results = evaluate_models(trained_data, X_test_final, y_test, current_feature_names, run_output_dir)
+        if results is None:
+            # Evaluate_models logs errors internally, main pipeline should still proceed if possible
+            logger.warning("Model evaluation process finished, but might have encountered errors (check logs). Results might be partial or None.")
+        logger.info("Model evaluation complete.")
+
+        logger.info("Saving trained models and scalers...")
+        save_pipeline_artifacts(trained_data, run_output_dir)
+        logger.info("Pipeline artifacts saved.")
+
+        logger.info("Baseline pipeline run completed successfully.")
+
+    except Exception as e:
+        logger.exception(f"Baseline pipeline run failed: {e}")
+        trained_data = None
+        results = None
+
+    finally:
+        end_time = datetime.datetime.now()
+        duration = end_time - start_time
+        logger.info(f"Pipeline finished in {duration}.")
+        return trained_data, results 

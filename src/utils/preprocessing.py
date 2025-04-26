@@ -7,6 +7,7 @@ import nibabel as nib
 import os
 import logging
 from scipy.ndimage import zoom
+from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +248,81 @@ def preprocess_mri_file(file_path, normalize=True, extract_core=True, num_core_s
         volume = normalize_volume(volume)
     
     return volume
+
+# --- Feature Matrix Preprocessing ---
+
+def preprocess_features(X: Optional[np.ndarray], feature_names: Optional[List[str]] = None) -> Optional[np.ndarray]:
+    """
+    Preprocess feature matrix (typically after extraction) to handle NaN and infinite values.
+    Replaces problematic values with the mean of the respective column (feature).
+    If a column consists entirely of NaN/Inf, it's replaced with zeros.
+
+    Args:
+        X (np.ndarray): Feature matrix.
+        feature_names (list, optional): Names of features for logging purposes.
+
+    Returns:
+        np.ndarray: Preprocessed feature matrix, or None if input is invalid or error occurs.
+    """
+    if X is None or X.size == 0:
+        logger.error("Cannot preprocess an empty or None feature matrix.")
+        return None
+
+    if not isinstance(X, np.ndarray):
+         logger.error("Input X must be a NumPy array.")
+         return None
+
+    if X.ndim != 2:
+        logger.error(f"Input X must be a 2D array (matrix), but got {X.ndim} dimensions.")
+        return None
+
+    X_clean = X.copy() # Work on a copy
+    nan_mask = np.isnan(X_clean)
+    inf_mask = np.isinf(X_clean)
+    problem_mask = nan_mask | inf_mask
+
+    if not np.any(problem_mask):
+        logger.debug("No NaN or infinite values found in the feature matrix.")
+        return X_clean # Return the copy which is already clean
+
+    total_problems = np.sum(problem_mask)
+    logger.warning(f"Found {total_problems} problematic values ({np.sum(nan_mask)} NaN, {np.sum(inf_mask)} infinite) in feature matrix of shape {X.shape}. Attempting imputation using column means.")
+
+    try:
+        for col_idx in range(X_clean.shape[1]):
+            col_data = X_clean[:, col_idx]
+            col_problem_mask = problem_mask[:, col_idx]
+
+            if np.any(col_problem_mask):
+                # Find indices of problematic and valid values in this column
+                problem_indices = np.where(col_problem_mask)[0]
+                valid_indices = np.where(~col_problem_mask)[0]
+
+                feature_name = feature_names[col_idx] if feature_names and col_idx < len(feature_names) else f"Feature_{col_idx}"
+
+                if valid_indices.size > 0:
+                    # Compute mean from valid values
+                    col_mean = np.mean(col_data[valid_indices])
+                    # Impute problematic values with the mean
+                    X_clean[problem_indices, col_idx] = col_mean
+                    logger.debug(f"Imputed {problem_indices.size} values in feature '{feature_name}' with mean {col_mean:.4f}")
+                else:
+                    # All values in the column are problematic, impute with zero
+                    X_clean[:, col_idx] = 0
+                    logger.warning(f"Feature '{feature_name}' consists entirely of NaN/Inf values. Imputed with zeros.")
+
+        # Final check to ensure no NaNs/Infs remain
+        if np.any(np.isnan(X_clean)) or np.any(np.isinf(X_clean)):
+            logger.error("NaN or Inf values still present after attempting imputation! Preprocessing failed.")
+            # Log where the problems might be
+            remaining_nan = np.sum(np.isnan(X_clean))
+            remaining_inf = np.sum(np.isinf(X_clean))
+            logger.error(f"Remaining issues: {remaining_nan} NaN, {remaining_inf} Inf.")
+            return None # Indicate failure
+        else:
+            logger.info("Successfully preprocessed feature matrix (handled NaN/Inf values).")
+            return X_clean
+
+    except Exception as e:
+        logger.exception(f"An error occurred during feature matrix preprocessing: {e}")
+        return None # Indicate failure

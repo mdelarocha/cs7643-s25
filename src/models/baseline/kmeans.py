@@ -5,437 +5,300 @@ K-Means clustering baseline model for Alzheimer's detection.
 import numpy as np
 import pandas as pd
 import logging
-from sklearn.cluster import KMeans
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, silhouette_score
-from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import mode
+from typing import Optional, Tuple, Dict, Any, List
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, silhouette_score, davies_bouldin_score, adjusted_rand_score, homogeneity_score, completeness_score, v_measure_score
+from sklearn.preprocessing import StandardScaler
+from scipy.optimize import linear_sum_assignment
+
+from ..base_model import BaseModel
 
 logger = logging.getLogger(__name__)
 
-def train_kmeans(X_train, n_clusters=2, random_state=42, n_init=10):
-    """
-    Train a K-Means clustering model with specified parameters.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        n_clusters (int, optional): Number of clusters.
-        random_state (int, optional): Random seed.
-        n_init (int, optional): Number of times the k-means algorithm will run with different centroid seeds.
-        
-    Returns:
-        KMeans: Trained model.
-    """
-    if X_train is None:
-        logger.error("Cannot train model with None inputs")
-        return None
-    
-    try:
-        # Initialize and train model
-        model = KMeans(
-            n_clusters=n_clusters,
-            random_state=random_state,
-            n_init=n_init
-        )
-        
-        model.fit(X_train)
-        
-        # Log model information
-        logger.info(f"Trained KMeans model (n_clusters={n_clusters})")
-        logger.info(f"Inertia: {model.inertia_:.4f}")
-        
-        return model
-    
-    except Exception as e:
-        logger.error(f"Error training KMeans model: {str(e)}")
-        return None
+# --- Helper function for scaling (Optional for K-Means, but often beneficial) ---
+def _standardize_features(X_train: np.ndarray, X_test: Optional[np.ndarray] = None) \
+                         -> Tuple[np.ndarray, Optional[np.ndarray], StandardScaler]:
+    """Standardize features using StandardScaler. Fits on train, transforms train and test."""
+    scaler = StandardScaler()
+    X_train_std = scaler.fit_transform(X_train)
+    logger.info(f"Scaled training data (KMeans). Mean: {np.mean(X_train_std):.3f}, Std: {np.std(X_train_std):.3f}")
+    X_test_std = scaler.transform(X_test) if X_test is not None else None
+    if X_test_std is not None: logger.debug("Scaled test data (KMeans).")
+    return X_train_std, X_test_std, scaler
 
-def find_optimal_clusters(X, max_clusters=10, random_state=42):
-    """
-    Find the optimal number of clusters using the elbow method and silhouette score.
+# --- Helper to map cluster labels to true labels using Hungarian algorithm ---
+def _map_clusters_to_labels(y_clusters: np.ndarray, y_true: np.ndarray) -> Dict[int, int]:
+    """Maps cluster IDs to true label IDs using the Hungarian algorithm."""
+    y_clusters = np.asarray(y_clusters)
+    y_true = np.asarray(y_true)
+    assert y_clusters.size == y_true.size
     
-    Args:
-        X (numpy.ndarray): Feature matrix.
-        max_clusters (int, optional): Maximum number of clusters to try.
-        random_state (int, optional): Random seed.
-        
-    Returns:
-        tuple: (optimal_k, metrics_dict, fig) - Optimal number of clusters, metrics for each k, and figure.
-    """
-    if X is None:
-        logger.error("Cannot find optimal clusters with None inputs")
-        return None, None, None
+    unique_clusters = np.unique(y_clusters)
+    unique_labels = np.unique(y_true)
+    n_clusters = len(unique_clusters)
+    n_labels = len(unique_labels)
     
-    try:
-        # Initialize metrics
-        metrics = {
-            'k': range(2, max_clusters + 1),
-            'inertia': [],
-            'silhouette': []
-        }
-        
-        # Evaluate each k
-        for k in metrics['k']:
-            # Train model
-            model = KMeans(n_clusters=k, random_state=random_state, n_init=10)
-            model.fit(X)
-            
-            # Calculate inertia (within-cluster sum of squares)
-            metrics['inertia'].append(model.inertia_)
-            
-            # Calculate silhouette score (measure of how similar an object is to its own cluster)
-            if len(X) > k:  # Silhouette score requires more samples than clusters
-                silhouette = silhouette_score(X, model.labels_)
-                metrics['silhouette'].append(silhouette)
-            else:
-                metrics['silhouette'].append(0)
-        
-        # Find optimal k using silhouette score
-        optimal_k = metrics['k'][np.argmax(metrics['silhouette'])]
-        
-        # Log results
-        logger.info(f"Optimal number of clusters: {optimal_k} with silhouette score: {max(metrics['silhouette']):.4f}")
-        
-        # Plot results
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        
-        # Plot inertia (elbow method)
-        ax1.plot(metrics['k'], metrics['inertia'], marker='o')
-        ax1.set_xlabel('Number of Clusters (k)')
-        ax1.set_ylabel('Inertia')
-        ax1.set_title('Elbow Method for Optimal k')
-        ax1.grid(True)
-        
-        # Plot silhouette score
-        ax2.plot(metrics['k'], metrics['silhouette'], marker='o')
-        ax2.set_xlabel('Number of Clusters (k)')
-        ax2.set_ylabel('Silhouette Score')
-        ax2.set_title('Silhouette Method for Optimal k')
-        ax2.grid(True)
-        
-        # Highlight optimal k
-        ax1.axvline(x=optimal_k, color='r', linestyle='--', alpha=0.5)
-        ax2.axvline(x=optimal_k, color='r', linestyle='--', alpha=0.5)
-        
-        plt.tight_layout()
-        
-        return optimal_k, metrics, fig
+    # Create cost matrix (negative intersection count)
+    cost_matrix = np.zeros((n_clusters, n_labels), dtype=int)
+    for i, cluster_id in enumerate(unique_clusters):
+        for j, label_id in enumerate(unique_labels):
+            # Count how many times this cluster overlaps with this true label
+            mask = (y_clusters == cluster_id) & (y_true == label_id)
+            cost_matrix[i, j] = -np.sum(mask)
     
-    except Exception as e:
-        logger.error(f"Error finding optimal clusters: {str(e)}")
-        return None, None, None
+    # Find the optimal assignment using Hungarian algorithm
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    # Create the mapping dictionary
+    mapping = {unique_clusters[r]: unique_labels[c] for r, c in zip(row_ind, col_ind)}
+    logger.debug(f"Cluster to label mapping: {mapping}")
+    return mapping
 
-def assign_cluster_labels(cluster_labels, true_labels):
-    """
-    Assign class labels to clusters by majority voting.
-    
-    Args:
-        cluster_labels (numpy.ndarray): Cluster assignments.
-        true_labels (numpy.ndarray): True class labels.
-        
-    Returns:
-        tuple: (cluster_to_class_map, accuracy) - Mapping from clusters to classes and accuracy.
-    """
-    if cluster_labels is None or true_labels is None:
-        logger.error("Cannot assign cluster labels with None inputs")
-        return {}, 0
-    
-    try:
-        # Initialize mapping
-        unique_clusters = np.unique(cluster_labels)
-        cluster_to_class = {}
-        
-        # For each cluster, find the most common true label
-        for cluster in unique_clusters:
-            mask = (cluster_labels == cluster)
-            cluster_true_labels = true_labels[mask]
-            
-            if len(cluster_true_labels) > 0:
-                most_common_label = mode(cluster_true_labels).mode[0]
-                cluster_to_class[cluster] = most_common_label
-            else:
-                cluster_to_class[cluster] = -1  # Default for empty clusters
-        
-        # Calculate accuracy using the mapping
-        predicted_labels = np.array([cluster_to_class[cluster] for cluster in cluster_labels])
-        accuracy = accuracy_score(true_labels, predicted_labels)
-        
-        logger.info(f"Assigned cluster labels with accuracy: {accuracy:.4f}")
-        logger.info(f"Cluster to class mapping: {cluster_to_class}")
-        
-        return cluster_to_class, accuracy
-    
-    except Exception as e:
-        logger.error(f"Error assigning cluster labels: {str(e)}")
-        return {}, 0
+# --- KMeans Model Class ---
+class KMeansModel(BaseModel):
+    """KMeans clustering model implementing the BaseModel interface."""
 
-def predict_with_kmeans(model, X, cluster_to_class_map=None):
-    """
-    Make predictions with a K-Means model, optionally mapping clusters to classes.
-    
-    Args:
-        model (KMeans): Trained model.
-        X (numpy.ndarray): Features to predict.
-        cluster_to_class_map (dict, optional): Mapping from cluster IDs to class labels.
+    @property
+    def needs_scaling(self) -> bool:
+        # K-Means is distance-based, so scaling is usually recommended
+        return True 
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, 
+            X_val: Optional[np.ndarray] = None, y_val: Optional[np.ndarray] = None) -> 'KMeansModel':
+        """Fit the KMeans model. Uses y_train only to determine n_clusters (or uses param).
+           Optionally standardizes data before fitting."""
+        logger.info(f"Fitting KMeans model...")
         
-    Returns:
-        numpy.ndarray: Predicted cluster assignments or class labels.
-    """
-    if model is None or X is None:
-        logger.error("Cannot predict with None inputs")
-        return None
-    
-    try:
-        # Get cluster assignments
-        cluster_assignments = model.predict(X)
-        
-        # If mapping is provided, map clusters to classes
-        if cluster_to_class_map is not None:
-            class_predictions = np.array([cluster_to_class_map.get(cluster, -1) for cluster in cluster_assignments])
-            return class_predictions
+        # 1. Determine n_clusters
+        if 'n_clusters' in self.model_params:
+            n_clusters = self.model_params['n_clusters']
+            logger.info(f"Using n_clusters={n_clusters} from model_params.")
+        elif y_train is not None:
+            n_clusters = len(np.unique(y_train))
+            logger.info(f"Determined n_clusters={n_clusters} from unique labels in y_train.")
         else:
-            return cluster_assignments
-    
-    except Exception as e:
-        logger.error(f"Error predicting with KMeans: {str(e)}")
+            default_k = 3 # Arbitrary default if no info given
+            logger.warning(f"Cannot determine n_clusters from y_train or params. Using default k={default_k}")
+            n_clusters = default_k
+            
+        self.model_params['n_clusters'] = n_clusters # Store the determined k
+        
+        # 2. Standardize features (optional but recommended)
+        X_train_proc = X_train
+        self.scaler = None # Initialize scaler as None
+        if self.model_params.get('standardize', True): # Default to standardize=True
+             logger.info("Standardizing features for KMeans.")
+             try:
+                  X_train_proc, _, self.scaler = _standardize_features(X_train)
+             except Exception as e:
+                  logger.exception("Error during standardization for KMeans. Fitting on unscaled data.")
+                  X_train_proc = X_train # Use original data if scaling fails
+             
+        # 3. Train KMeans model
+        logger.info(f"Training KMeans with k={n_clusters}...")
+        try:
+            init_method = self.model_params.get('init', 'k-means++')
+            n_init = self.model_params.get('n_init', 10) # Default in scikit-learn
+            max_iter = self.model_params.get('max_iter', 300)
+            
+            self.model = KMeans(
+                n_clusters=n_clusters, 
+                init=init_method, 
+                n_init=n_init, 
+                max_iter=max_iter, 
+                random_state=42
+            )
+            self.model.fit(X_train_proc) # Fit on processed (potentially scaled) data
+            logger.info(f"KMeans model training complete. Inertia: {self.model.inertia_:.2f}")
+
+        except Exception as e:
+            logger.exception(f"Error training KMeans model: {e}")
+            raise
+             
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict cluster assignments. Applies scaling if scaler was fitted."""
+        if self.model is None: raise RuntimeError("Model not trained.")
+        
+        X_proc = X
+        if self.scaler is not None:
+            logger.debug("Applying scaling before KMeans prediction.")
+            try:
+                X_proc = self.scaler.transform(X)
+            except Exception as e:
+                 logger.exception("Error applying scaler during prediction. Predicting on raw data.")
+                 X_proc = X # Use raw data if scaling fails
+        
+        try:
+            predictions = self.model.predict(X_proc)
+            return predictions
+        except Exception as e:
+             logger.exception(f"Error during prediction: {e}")
+             raise
+
+    def predict_proba(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """KMeans does not predict probabilities in the classification sense. Returns None."""
+        logger.warning("predict_proba is not applicable for KMeans.")
         return None
 
-def evaluate_clustering_as_classifier(model, X_test, y_test, cluster_to_class_map):
-    """
-    Evaluate a K-Means model as a classifier using a mapping from clusters to classes.
-    
-    Args:
-        model (KMeans): Trained model.
-        X_test (numpy.ndarray): Test features.
-        y_test (numpy.ndarray): Test labels.
-        cluster_to_class_map (dict): Mapping from cluster IDs to class labels.
+    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        """Evaluate KMeans clustering using internal and external metrics (if true labels provided)."""
+        if self.model is None: raise RuntimeError("Model not trained.")
         
-    Returns:
-        dict: Dictionary of evaluation metrics.
-    """
-    if model is None or X_test is None or y_test is None or not cluster_to_class_map:
-        logger.error("Cannot evaluate model with None inputs")
-        return {}
-    
-    try:
-        # Make predictions
-        y_pred = predict_with_kmeans(model, X_test, cluster_to_class_map)
-        
-        # Calculate metrics
+        X_test_proc = X_test
+        if self.scaler is not None:
+            logger.debug("Applying scaling before KMeans evaluation.")
+            try:
+                X_test_proc = self.scaler.transform(X_test)
+            except Exception as e:
+                 logger.exception("Error applying scaler during evaluation. Evaluating on raw data.")
+                 X_test_proc = X_test # Use raw data if scaling fails
+
+        logger.info(f"Evaluating KMeans model (k={self.model.n_clusters})...")
         metrics = {}
-        metrics['accuracy'] = accuracy_score(y_test, y_pred)
-        metrics['classification_report'] = classification_report(y_test, y_pred, output_dict=True)
-        metrics['confusion_matrix'] = confusion_matrix(y_test, y_pred).tolist()
-        
-        # Log results
-        logger.info(f"Test accuracy: {metrics['accuracy']:.4f}")
-        
-        return metrics
-    
-    except Exception as e:
-        logger.error(f"Error evaluating clustering as classifier: {str(e)}")
-        return {}
+        try:
+            y_pred_clusters = self.model.predict(X_test_proc)
+            
+            # --- Internal Evaluation Metrics (don't require true labels) ---
+            try:
+                 # Silhouette Score: Higher is better (-1 to 1)
+                 metrics['silhouette_score'] = silhouette_score(X_test_proc, y_pred_clusters)
+                 logger.info(f"  Silhouette Score: {metrics['silhouette_score']:.4f}")
+            except ValueError as sil_err: # Can fail if only 1 cluster predicted
+                 logger.warning(f"Could not calculate Silhouette Score: {sil_err}")
+                 metrics['silhouette_score'] = None
+            
+            try:
+                 # Davies-Bouldin Score: Lower is better (>= 0)
+                 metrics['davies_bouldin_score'] = davies_bouldin_score(X_test_proc, y_pred_clusters)
+                 logger.info(f"  Davies-Bouldin Score: {metrics['davies_bouldin_score']:.4f}")
+            except ValueError as db_err:
+                 logger.warning(f"Could not calculate Davies-Bouldin Score: {db_err}")
+                 metrics['davies_bouldin_score'] = None
 
-def plot_clusters(X, model, X_reduced=None, feature_idx1=0, feature_idx2=1, true_labels=None, output_path=None):
-    """
-    Plot clusters assigned by K-Means model.
-    
-    Args:
-        X (numpy.ndarray): Feature matrix.
-        model (KMeans): Trained model.
-        X_reduced (numpy.ndarray, optional): Dimensionality-reduced features (e.g., PCA).
-        feature_idx1 (int, optional): Index of first feature to plot if X_reduced not provided.
-        feature_idx2 (int, optional): Index of second feature to plot if X_reduced not provided.
-        true_labels (numpy.ndarray, optional): True class labels for comparison.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The cluster plot figure.
-    """
-    if model is None or X is None:
-        logger.error("Cannot plot clusters with None inputs")
-        return None
-    
-    try:
-        # Get cluster assignments
-        cluster_labels = model.labels_ if hasattr(model, 'labels_') else model.predict(X)
-        
-        # Prepare data for plotting
-        if X_reduced is not None:
-            # Use pre-reduced data (e.g., PCA)
-            plot_data = X_reduced[:, :2]  # Use first two components
-        else:
-            # Use selected features
-            plot_data = X[:, [feature_idx1, feature_idx2]]
-        
-        # Create figure
-        n_plots = 1 if true_labels is None else 2
-        fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 5))
-        
-        if n_plots == 1:
-            ax1 = axes
-        else:
-            ax1, ax2 = axes
-        
-        # Plot clusters
-        scatter = ax1.scatter(plot_data[:, 0], plot_data[:, 1], c=cluster_labels, cmap='viridis', 
-                          edgecolor='k', s=50, alpha=0.8)
-        
-        # Plot centroids
-        centroids = model.cluster_centers_
-        if X_reduced is not None:
-            # If data is reduced, we need to project centroids to the same space
-            # For simplicity, we'll skip this and just not plot centroids for reduced data
-            pass
-        else:
-            # Plot centroids in original feature space
-            ax1.scatter(centroids[:, feature_idx1], centroids[:, feature_idx2], 
-                     marker='X', s=200, color='red', label='Centroids')
-        
-        ax1.set_title('K-Means Clustering Results')
-        ax1.set_xlabel('Feature 1' if X_reduced is None else 'Component 1')
-        ax1.set_ylabel('Feature 2' if X_reduced is None else 'Component 2')
-        ax1.legend()
-        
-        # If true labels provided, plot for comparison
-        if true_labels is not None:
-            scatter2 = ax2.scatter(plot_data[:, 0], plot_data[:, 1], c=true_labels, cmap='viridis', 
-                              edgecolor='k', s=50, alpha=0.8)
-            ax2.set_title('True Labels')
-            ax2.set_xlabel('Feature 1' if X_reduced is None else 'Component 1')
-            ax2.set_ylabel('Feature 2' if X_reduced is None else 'Component 2')
-            
-            # Add legend for true labels
-            legend2 = ax2.legend(*scatter2.legend_elements(), title="Classes")
-            ax2.add_artist(legend2)
-        
-        plt.tight_layout()
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.savefig(output_path)
-            logger.info(f"Cluster plot saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting clusters: {str(e)}")
-        return None
+            # Inertia (Sum of squared distances to closest centroid)
+            metrics['inertia'] = self.model.inertia_
+            logger.info(f"  Inertia (Train Set): {metrics['inertia']:.2f}") # Note: Inertia is from training
 
-def standardize_features(X_train, X_test=None, X_val=None):
-    """
-    Standardize features by removing the mean and scaling to unit variance.
-    
-    Args:
-        X_train (numpy.ndarray): Training features.
-        X_test (numpy.ndarray, optional): Test features.
-        X_val (numpy.ndarray, optional): Validation features.
+            # --- External Evaluation Metrics (require true labels y_test) ---
+            if y_test is not None:
+                 logger.info("Calculating external evaluation metrics using true labels...")
+                 try:
+                      # Adjusted Rand Index (ARI): Measures similarity between true and cluster labels. Max=1.
+                      metrics['adjusted_rand_index'] = adjusted_rand_score(y_test, y_pred_clusters)
+                      logger.info(f"  Adjusted Rand Index: {metrics['adjusted_rand_index']:.4f}")
+                 except Exception as ari_err:
+                      logger.warning(f"Could not calculate Adjusted Rand Index: {ari_err}")
+                      
+                 try:
+                      # Homogeneity, Completeness, V-measure: Range [0, 1], higher is better.
+                      metrics['homogeneity_score'] = homogeneity_score(y_test, y_pred_clusters)
+                      metrics['completeness_score'] = completeness_score(y_test, y_pred_clusters)
+                      metrics['v_measure_score'] = v_measure_score(y_test, y_pred_clusters)
+                      logger.info(f"  Homogeneity: {metrics['homogeneity_score']:.4f}, Completeness: {metrics['completeness_score']:.4f}, V-Measure: {metrics['v_measure_score']:.4f}")
+                 except Exception as hcv_err:
+                     logger.warning(f"Could not calculate Homogeneity/Completeness/V-Measure: {hcv_err}")
+                     
+                 # Evaluate as Classifier (Map clusters to labels & calc accuracy etc.)
+                 try:
+                     cluster_label_map = _map_clusters_to_labels(y_pred_clusters, y_test)
+                     y_pred_mapped = np.vectorize(cluster_label_map.get)(y_pred_clusters)
+                     
+                     accuracy = accuracy_score(y_test, y_pred_mapped)
+                     f1 = f1_score(y_test, y_pred_mapped, average='weighted', zero_division=0)
+                     cm = confusion_matrix(y_test, y_pred_mapped)
+                     report = classification_report(y_test, y_pred_mapped, zero_division=0, output_dict=True)
+                     
+                     metrics['mapped_accuracy'] = accuracy
+                     metrics['mapped_f1_score'] = f1
+                     metrics['mapped_confusion_matrix'] = cm
+                     metrics['mapped_classification_report'] = report
+                     logger.info(f"  Mapped Accuracy: {accuracy:.4f}, Mapped F1: {f1:.4f}")
+                     
+                 except Exception as map_err:
+                      logger.warning(f"Could not evaluate KMeans as classifier via mapping: {map_err}")
+                      
+            return metrics
+        except Exception as e:
+            logger.exception(f"Error during KMeans evaluation: {e}")
+            return {"error": str(e)}
+            
+    # KMeans does not have intrinsic feature importance
+    def plot_feature_importance(self, feature_names: List[str], output_path: str):
+        """Feature importance is not applicable for KMeans."""
+        super().plot_feature_importance(feature_names, output_path)
         
-    Returns:
-        tuple: (X_train_scaled, X_test_scaled, X_val_scaled, scaler) - Scaled features and scaler.
-    """
-    if X_train is None:
-        logger.error("Cannot standardize None features")
-        return None, None, None, None
-    
-    try:
-        # Initialize scaler
-        scaler = StandardScaler()
-        
-        # Fit on training data and transform
-        X_train_scaled = scaler.fit_transform(X_train)
-        
-        # Transform test and validation data if provided
-        X_test_scaled = scaler.transform(X_test) if X_test is not None else None
-        X_val_scaled = scaler.transform(X_val) if X_val is not None else None
-        
-        logger.info("Features standardized")
-        
-        return X_train_scaled, X_test_scaled, X_val_scaled, scaler
-    
-    except Exception as e:
-        logger.error(f"Error standardizing features: {str(e)}")
-        return X_train, X_test, X_val, None
+    # Implement cluster plotting
+    def plot_clusters(self, X: np.ndarray, y: Optional[np.ndarray], output_path: str):
+         """Plot K-Means clusters (using first 2 features or PCA). Applies scaling if needed."""
+         if self.model is None: raise RuntimeError("Model not trained.")
+         
+         X_proc = X
+         if self.scaler is not None:
+             try:
+                 X_proc = self.scaler.transform(X)
+             except Exception as e:
+                  logger.exception("Error applying scaler for plotting. Plotting raw data.")
+                  X_proc = X
 
-def plot_silhouette_analysis(X, model, output_path=None):
-    """
-    Plot silhouette analysis for K-Means clustering results.
-    
-    Args:
-        X (numpy.ndarray): Feature matrix.
-        model (KMeans): Trained model.
-        output_path (str, optional): Path to save the plot.
-        
-    Returns:
-        matplotlib.figure.Figure: The silhouette analysis figure.
-    """
-    if X is None or model is None:
-        logger.error("Cannot plot silhouette with None inputs")
-        return None
-    
-    try:
-        from sklearn.metrics import silhouette_samples
-        
-        # Compute cluster labels and silhouette scores
-        cluster_labels = model.predict(X)
-        n_clusters = len(set(cluster_labels))
-        
-        # Skip if only one cluster or more clusters than samples
-        if n_clusters <= 1 or n_clusters >= len(X):
-            logger.error(f"Cannot plot silhouette with {n_clusters} clusters for {len(X)} samples")
-            return None
-        
-        # Compute the silhouette scores for each sample
-        silhouette_vals = silhouette_samples(X, cluster_labels)
-        silhouette_avg = silhouette_score(X, cluster_labels)
-        
-        # Create figure
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        
-        y_lower = 10
-        
-        # Plot silhouette scores for each cluster
-        for i in range(n_clusters):
-            # Get silhouette values for cluster i
-            ith_cluster_silhouette_values = silhouette_vals[cluster_labels == i]
-            ith_cluster_silhouette_values.sort()
-            
-            # Size of the cluster
-            size_cluster_i = ith_cluster_silhouette_values.shape[0]
-            y_upper = y_lower + size_cluster_i
-            
-            # Generate color for the cluster
-            color = plt.cm.viridis(float(i) / n_clusters)
-            
-            # Fill the silhouette
-            ax.fill_betweenx(np.arange(y_lower, y_upper), 0, 
-                           ith_cluster_silhouette_values,
-                           facecolor=color, alpha=0.7)
-            
-            # Label the cluster
-            ax.text(-0.05, y_lower + 0.5 * size_cluster_i, str(i))
-            
-            # Compute the new y_lower for next plot
-            y_lower = y_upper + 10
-        
-        # Add average silhouette score line
-        ax.axvline(x=silhouette_avg, color="red", linestyle="--")
-        
-        ax.set_title(f"Silhouette Analysis (Avg. Score: {silhouette_avg:.3f})")
-        ax.set_xlabel("Silhouette Coefficient")
-        ax.set_ylabel("Cluster")
-        ax.set_yticks([])  # Clear y ticks
-        ax.set_xlim([-0.1, 1])
-        
-        # Save the plot if output path is provided
-        if output_path:
-            plt.tight_layout()
-            plt.savefig(output_path)
-            logger.info(f"Silhouette plot saved to {output_path}")
-        
-        return fig
-    
-    except Exception as e:
-        logger.error(f"Error plotting silhouette analysis: {str(e)}")
-        return None 
+         try:
+             # Reduce dimensionality for plotting if necessary (e.g., > 2 features)
+             if X_proc.shape[1] > 2:
+                 logger.info("Performing PCA for 2D visualization of clusters.")
+                 from sklearn.decomposition import PCA # Local import
+                 pca = PCA(n_components=2, random_state=42)
+                 X_plot = pca.fit_transform(X_proc)
+                 xlabel, ylabel = "PCA Component 1", "PCA Component 2"
+             elif X_proc.shape[1] == 2:
+                 X_plot = X_proc
+                 # Assume first two features are meaningful? Get names if available.
+                 xlabel, ylabel = "Feature 1", "Feature 2" # Placeholder labels
+             else:
+                 logger.error(f"Cannot plot clusters for data with shape {X.shape}")
+                 return
+                 
+             # Get cluster assignments and centroids
+             cluster_assignments = self.predict(X) # Predict on original X, handles scaling inside
+             centroids = self.model.cluster_centers_
+             
+             # If PCA was used, transform centroids
+             if X_proc.shape[1] > 2:
+                 centroids_plot = pca.transform(centroids)
+             else:
+                 centroids_plot = centroids
+             
+             plt.figure(figsize=(10, 8))
+             # Plot data points, colored by predicted cluster
+             sns.scatterplot(x=X_plot[:, 0], y=X_plot[:, 1], hue=cluster_assignments, 
+                             palette='viridis', alpha=0.7, legend='full')
+             
+             # Plot centroids
+             plt.scatter(centroids_plot[:, 0], centroids_plot[:, 1], marker='X', s=200, 
+                         c='red', edgecolors='k', label='Centroids')
+             
+             plt.title(f'K-Means Clustering (k={self.model.n_clusters})')
+             plt.xlabel(xlabel)
+             plt.ylabel(ylabel)
+             plt.legend()
+             plt.grid(True, linestyle='--', alpha=0.6)
+             plt.tight_layout()
+             
+             plt.savefig(output_path)
+             plt.close()
+             logger.info(f"Saved cluster plot to {output_path}")
+             
+         except Exception as e:
+              logger.exception(f"Error plotting KMeans clusters: {e}")
+ 
+# --- Remove old standalone functions ---
+# train_kmeans
+# assign_cluster_labels
+# evaluate_clustering
+# evaluate_clustering_as_classifier
+# plot_clusters
+# plot_elbow_method
+# plot_silhouette_scores 
