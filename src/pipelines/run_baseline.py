@@ -82,7 +82,8 @@ def parse_args():
     
     # Added option for combining CDR scores
     parser.add_argument('--combine_cdr', action='store_true',
-                        help="Combine CDR scores 1 and 2 into a single category (>=1)")
+                        help="Combine CDR scores >= 0.5 into a single 'demented' category (1) for binary classification. "
+                             "If flag is not set, performs 3-class classification (0: non-demented, 1: very mild, 2: mild/moderate).")
     
     return parser.parse_args()
 

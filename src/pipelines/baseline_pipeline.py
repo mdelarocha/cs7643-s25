@@ -303,7 +303,7 @@ def run_baseline_pipeline(
     model_params: Optional[Dict[str, Dict[str, Any]]] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Dict]]]:
     """
-    Run the consolidated end-to-end baseline model pipeline.
+    Runs the consolidated end-to-end baseline model pipeline.
     
     Args:
         metadata_path: Path to metadata CSV.
@@ -311,19 +311,21 @@ def run_baseline_pipeline(
         output_dir: Base directory to save results (timestamped subdir created).
         model_types: List of model types to train.
         feature_types: List of feature types to extract.
-        split_strategy: Method for splitting data ('stratified', 'subject', 'range').
+        split_strategy: Method for splitting data ('subject', 'stratified', 'range'). Defaults to 'subject'.
         test_size: Proportion for test set (used if strategy is not 'range').
         val_size: Proportion for validation set (used if strategy is not 'range').
         train_range: Tuple (start_idx, end_idx) for 'range' split strategy.
         n_features: Number of features to select (<=0 or None disables selection).
-        combine_cdr: Whether to combine CDR scores 1 and 2.
+        combine_cdr: If True, performs binary classification (0 vs >=0.5) using 'CDR_Combined' column.
+                     If False (default behavior implicitly if flag not set in run_baseline.py),
+                     performs 3-class classification (0, 1, 2) using 'CDR' column from dataloader.
         random_state: Seed for random operations.
         model_params: Optional dictionary mapping model_type name to its specific configuration dict.
         
     Returns:
-        tuple: (trained_data, evaluation_results)
-               trained_data = {'models': {...}, 'scalers': {...}}
-               evaluation_results = {model_type: metrics_dict}
+        tuple: (trained_models, evaluation_results)
+               trained_models: Dictionary {model_type: trained_model_instance}.
+               evaluation_results: Dictionary {model_type: metrics_dict}.
     """
     start_time = datetime.datetime.now()
     timestamp = start_time.strftime("%Y%m%d_%H%M%S")

@@ -13,16 +13,20 @@ logger = logging.getLogger(__name__)
 
 def load_oasis_metadata(file_path: str, combine_cdr: bool = False) -> Optional[pd.DataFrame]:
     """
-    Load OASIS dataset metadata from CSV.
-    Optionally combines CDR scores 1.0 and 2.0 into a single category >= 1.0.
+    Load OASIS dataset metadata from CSV, performs cleaning, and prepares label column.
+    
+    Handles column renaming, missing value imputation (median for SES, dropping rows for MMSE/CDR),
+    and generates the target label column based on the `combine_cdr` flag.
 
     Args:
         file_path (str): Path to the metadata CSV file.
-        combine_cdr (bool): If True, map CDR 1.0 and 2.0 to 1.0 in a new 'CDR_Combined' column.
-                          Otherwise, use the original 'CDR' column.
+        combine_cdr (bool): Controls the target variable creation:
+                          - If True: Creates a binary 'CDR_Combined' column (0: non-demented, 1: demented >= 0.5).
+                          - If False: Creates a three-class 'CDR' column (0: non-demented, 1: very mild=0.5, 2: mild/moderate >= 1.0).
 
     Returns:
-        pd.DataFrame: Loaded metadata or None if error.
+        pd.DataFrame: Loaded and processed metadata with appropriate label column ('CDR' or 'CDR_Combined'),
+                      or None if a critical error occurs (e.g., file not found, CDR missing).
     """
     if not os.path.exists(file_path):
         logger.error(f"Metadata file not found: {file_path}")

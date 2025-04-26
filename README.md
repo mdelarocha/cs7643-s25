@@ -1,78 +1,102 @@
-# MRI Analysis for Alzheimer's Detection
+# Alzheimer's Detection Project
 
-This project implements machine learning models for Alzheimer's disease detection using MRI scans from the OASIS dataset.
+This project aims to detect Alzheimer's disease using MRI data.
 
-## Directory Structure
+## Project Structure
 
 ```
-.
-├── data/                # Data directory
-│   ├── raw/             # Raw MRI scans
-│   └── processed/       # Preprocessed data
-├── outputs/             # Model outputs and results
-├── src/                 # Source code
-│   ├── features/        # Feature extraction modules
-│   ├── models/          # Model implementation
-│   │   ├── baseline/    # Traditional ML models
-│   │   └── deep_learning/ # Deep learning models
-│   ├── pipelines/       # End-to-end pipelines
-│   └── utils/           # Utility functions
-├── notebooks/           # Jupyter notebooks for exploration
-├── team_members/        # Team member workspaces
-├── tests/               # Unit tests
-└── run_pipeline.py      # Main entry point
+project_root/
+├── data/
+│   ├── raw/          # Raw MRI scans (e.g., NIfTI, ANALYZE)
+│   └── oasis-cross-sectional.csv # Metadata file
+├── notebooks/        # Jupyter notebooks for exploration, visualization
+├── outputs/          # Directory for pipeline outputs (models, results, plots)
+│   └── baseline_run_TIMESTAMP/
+│       ├── evaluation_metrics.json
+│       ├── *.png                   # Plots (Confusion Matrix, Feature Importance, etc.)
+│       ├── feature_importance.csv
+│       └── models/                 # Saved model artifacts
+│           └── *.pkl
+├── src/
+│   ├── features/       # Feature extraction (statistical, textural, etc.)
+│   │   ├── __init__.py
+│   │   ├── core.py
+│   │   ├── statistical.py
+│   │   └── ...
+│   ├── models/         # Model implementations
+│   │   ├── __init__.py
+│   │   ├── base_model.py # Abstract base class for models
+│   │   └── baseline/     # Baseline model implementations (LR, RF, KNN, etc.)
+│   │       ├── __init__.py
+│   │       ├── logistic_regression.py
+│   │       └── ...
+│   ├── pipelines/      # End-to-end pipelines
+│   │   ├── __init__.py
+│   │   ├── baseline_pipeline.py # Core logic for baseline runs
+│   │   └── run_baseline.py      # CLI script to execute the baseline pipeline
+│   └── utils/          # Utility functions (dataloader, preprocessing, helpers)
+│       ├── __init__.py
+│       ├── dataloader.py
+│       ├── preprocessing.py
+│       └── ...
+├── tests/            # Unit and integration tests
+├── requirements.txt  # Project dependencies
+└── README.md         # This file
 ```
 
-## Key Components
+## Baseline Models Pipeline
 
-- **Data Loading**: Utilities for loading OASIS dataset metadata and MRI volumes
-- **Preprocessing**: Comprehensive MRI preprocessing functions
-- **Feature Extraction**: Statistical and textural feature extraction from MRI scans
-- **Baseline Models**: Traditional machine learning models (Logistic Regression, SVM, Random Forest, etc.)
-- **Visualization**: Tools for visualizing MRI data and model results
-- **Pipelines**: End-to-end pipelines from raw data to predictions
+The `src/pipelines/run_baseline.py` script provides a command-line interface to run baseline machine learning models for Alzheimer's detection based on extracted features.
 
-## Usage
+**Purpose:**
+These baseline models (Logistic Regression, Random Forest, KNN, K-Means) serve as a benchmark. They are trained on statistical and/or textural features extracted from MRI data. The methodology focuses on providing a consistent framework and results for comparison against more complex Deep Learning approaches.
 
-### Running the Full Pipeline
+**Features:**
+*   Modular design using a `BaseModel` interface (`src/models/base_model.py`).
+*   Configurable feature extraction (`statistical`, `textural`).
+*   Configurable model selection.
+*   Subject-aware data splitting (default) to prevent data leakage.
+*   Handles 3-class classification (non-demented=0, very mild=1, mild/moderate=2) by default.
+*   Option to run binary classification (non-demented=0, demented>=0.5 -> 1) using `--combine_cdr` flag.
+*   Generates evaluation metrics, confusion matrices, and feature importance plots.
 
-```bash
-python run_pipeline.py
-```
+**Usage:**
 
-### Running the Baseline Pipeline
+Navigate to the project root directory.
 
-```bash
-python -m src.pipelines.run_baseline --metadata_path data/oasis-cross-sectional.csv --data_dir data/raw --output_dir outputs
-```
+*   **Run default 3-class classification with LR and RF using statistical features:**
+    ```bash
+    python -m src.pipelines.run_baseline --model_types logistic_regression random_forest --feature_types statistical
+    ```
 
-### Running with Specific Options
+*   **Run all baseline classifiers (excluding SVM) for 3-class problem:**
+    ```bash
+    python -m src.pipelines.run_baseline --model_types logistic_regression random_forest knn kmeans --feature_types statistical 
+    ```
 
-```bash
-python -m src.pipelines.run_baseline --model_types logistic_regression random_forest --feature_types statistical
-```
+*   **Run binary classification (Non-demented vs. Demented) using Random Forest:**
+    ```bash
+    python -m src.pipelines.run_baseline --model_types random_forest --feature_types statistical --combine_cdr
+    ```
 
-## Dependencies
+*   **Specify different parameters (e.g., test size, feature selection):**
+    ```bash
+    python -m src.pipelines.run_baseline --model_types knn --feature_types statistical --test_size 0.25 --n_features 30
+    ```
 
-The project requires the following dependencies:
-- NumPy, Pandas, SciKit-Learn
-- TensorFlow, PyTorch (for deep learning models)
-- Nibabel (for NIfTI file handling)
-- Matplotlib, Seaborn, Plotly (for visualization)
+See `python -m src.pipelines.run_baseline --help` for all available options.
 
-Install dependencies with:
+**Outputs:**
+Results are saved in a timestamped subdirectory within `outputs/`, e.g., `outputs/baseline_run_YYYYMMDD_HHMMSS/`.
+This includes:
+*   `evaluation_metrics.json`: Detailed performance metrics for each model.
+*   Confusion matrix plots (`*_confusion_matrix.png`).
+*   Feature importance plots (`*_feature_importance.png`).
+*   Overall selected feature importance (`feature_importance.csv`).
+*   Saved model artifacts (e.g., `*.pkl` files for trained models and scalers).
 
-```bash
-pip install -r requirements.txt
-```
+## Next Steps
 
-## Dataset
-
-This project uses the OASIS (Open Access Series of Imaging Studies) dataset, which provides a cross-sectional collection of MRI scans of healthy individuals and those with Alzheimer's disease. The dataset includes:
-
-- T1-weighted MRI scans
-- Clinical data including demographics, Mini-Mental State Examination (MMSE) scores, and Clinical Dementia Rating (CDR) scores
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE.txt file for details.
+*   Develop and integrate Deep Learning models.
+*   Compare DL model performance against these established baselines.
+*   Further explore feature engineering and data augmentation techniques.
