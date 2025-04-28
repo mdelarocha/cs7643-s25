@@ -10,7 +10,11 @@ import seaborn as sns
 from typing import Optional, Tuple, Dict, Any, List
 
 from sklearn.cluster import KMeans
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, silhouette_score, davies_bouldin_score, adjusted_rand_score, homogeneity_score, completeness_score, v_measure_score
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix, silhouette_score, 
+    davies_bouldin_score, adjusted_rand_score, homogeneity_score, 
+    completeness_score, v_measure_score, f1_score
+)
 from sklearn.preprocessing import StandardScaler
 from scipy.optimize import linear_sum_assignment
 
@@ -231,6 +235,16 @@ class KMeansModel(BaseModel):
     def plot_feature_importance(self, feature_names: List[str], output_path: str):
         """Feature importance is not applicable for KMeans."""
         super().plot_feature_importance(feature_names, output_path)
+
+    def plot_roc_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """ROC curve is not applicable for KMeans clustering."""
+        logger.warning(f"ROC curve plotting is not applicable for {self.__class__.__name__}. Skipping.")
+        pass # Do nothing
+
+    def plot_precision_recall_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """Precision-Recall curve is not applicable for KMeans clustering."""
+        logger.warning(f"Precision-Recall curve plotting is not applicable for {self.__class__.__name__}. Skipping.")
+        pass # Do nothing
         
     # Implement cluster plotting
     def plot_clusters(self, X: np.ndarray, y: Optional[np.ndarray], output_path: str):

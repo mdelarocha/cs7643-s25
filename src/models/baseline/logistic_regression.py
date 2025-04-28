@@ -17,6 +17,11 @@ import seaborn as sns
 import joblib # Use joblib for potentially more robust serialization than pickle
 from typing import Optional, Tuple, Dict, Any, List
 
+# Added imports for plotting
+from sklearn.metrics import RocCurveDisplay, PrecisionRecallDisplay
+from sklearn.preprocessing import label_binarize
+from itertools import cycle
+
 from ..base_model import BaseModel # Import the base class
 
 logger = logging.getLogger(__name__)
@@ -257,6 +262,120 @@ class LogisticRegressionModel(BaseModel):
             
         except Exception as e:
              logger.exception(f"Error plotting feature importance: {e}")
+
+    def plot_roc_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """Plot ROC curve for the Logistic Regression model."""
+        if self.model is None or not hasattr(self.model, "predict_proba"):
+            logger.error("Cannot plot ROC curve: model not trained or does not support predict_proba.")
+            return
+        if self.scaler is None:
+            logger.error("Cannot plot ROC curve: scaler not available.")
+            return
+
+        try:
+            X_test_std = self.scaler.transform(X_test)
+            n_classes = len(self.model.classes_)
+            class_names = [str(c) for c in self.model.classes_]
+
+            if n_classes <= 2: # Binary or pseudo-binary
+                fig, ax = plt.subplots(figsize=(8, 6))
+                try:
+                    RocCurveDisplay.from_estimator(self.model, X_test_std, y_test, ax=ax, name=self.__class__.__name__)
+                    ax.set_title(f'ROC Curve - {self.__class__.__name__}')
+                    plt.tight_layout()
+                    plt.savefig(output_path)
+                    plt.close(fig)
+                    logger.info(f"Saved ROC curve plot to {output_path}")
+                except Exception as e:
+                    logger.exception(f"Error generating ROC curve for {self.__class__.__name__}: {e}")
+                    plt.close(fig)
+
+            else: # Multi-class case (One-vs-Rest)
+                y_test_bin = label_binarize(y_test, classes=self.model.classes_)
+                y_score = self.model.predict_proba(X_test_std)
+
+                fig, ax = plt.subplots(figsize=(8, 6))
+                colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'green', 'red', 'purple'])
+                for i, color in zip(range(n_classes), colors):
+                    try:
+                        RocCurveDisplay.from_predictions(
+                            y_test_bin[:, i],
+                            y_score[:, i],
+                            name=f"ROC curve of class {class_names[i]}",
+                            color=color,
+                            ax=ax,
+                        )
+                    except Exception as e_cls:
+                        logger.warning(f"Could not plot ROC for class {class_names[i]}: {e_cls}")
+                
+                ax.plot([0, 1], [0, 1], "k--", label="chance level (AUC = 0.5)")
+                ax.set_xlabel("False Positive Rate")
+                ax.set_ylabel("True Positive Rate")
+                ax.set_title(f"Multi-class ROC Curve (One-vs-Rest) - {self.__class__.__name__}")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(output_path)
+                plt.close(fig)
+                logger.info(f"Saved multi-class ROC curve plot to {output_path}")
+
+        except Exception as e:
+            logger.exception(f"General error plotting ROC curve for {self.__class__.__name__}: {e}")
+
+    def plot_precision_recall_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """Plot Precision-Recall curve for the Logistic Regression model."""
+        if self.model is None or not hasattr(self.model, "predict_proba"):
+            logger.error("Cannot plot Precision-Recall curve: model not trained or does not support predict_proba.")
+            return
+        if self.scaler is None:
+            logger.error("Cannot plot Precision-Recall curve: scaler not available.")
+            return
+
+        try:
+            X_test_std = self.scaler.transform(X_test)
+            n_classes = len(self.model.classes_)
+            class_names = [str(c) for c in self.model.classes_]
+
+            if n_classes <= 2: # Binary or pseudo-binary
+                fig, ax = plt.subplots(figsize=(8, 6))
+                try:
+                    PrecisionRecallDisplay.from_estimator(self.model, X_test_std, y_test, ax=ax, name=self.__class__.__name__)
+                    ax.set_title(f'Precision-Recall Curve - {self.__class__.__name__}')
+                    plt.tight_layout()
+                    plt.savefig(output_path)
+                    plt.close(fig)
+                    logger.info(f"Saved Precision-Recall curve plot to {output_path}")
+                except Exception as e:
+                    logger.exception(f"Error generating Precision-Recall curve for {self.__class__.__name__}: {e}")
+                    plt.close(fig)
+            else: # Multi-class case (One-vs-Rest)
+                y_test_bin = label_binarize(y_test, classes=self.model.classes_)
+                y_score = self.model.predict_proba(X_test_std)
+                
+                fig, ax = plt.subplots(figsize=(8, 6))
+                colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'green', 'red', 'purple'])
+                for i, color in zip(range(n_classes), colors):
+                    try:
+                        PrecisionRecallDisplay.from_predictions(
+                            y_test_bin[:, i],
+                            y_score[:, i],
+                            name=f"PR curve of class {class_names[i]}",
+                            color=color,
+                            ax=ax,
+                        )
+                    except Exception as e_cls:
+                         logger.warning(f"Could not plot Precision-Recall for class {class_names[i]}: {e_cls}")
+                
+                ax.set_xlabel("Recall")
+                ax.set_ylabel("Precision")
+                ax.set_title(f"Multi-class Precision-Recall Curve (One-vs-Rest) - {self.__class__.__name__}")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(output_path)
+                plt.close(fig)
+                logger.info(f"Saved multi-class Precision-Recall curve plot to {output_path}")
+
+        except Exception as e:
+            logger.exception(f"General error plotting Precision-Recall curve for {self.__class__.__name__}: {e}")
 
 def plot_roc_curve(model, X_test, y_test, output_path=None):
     """

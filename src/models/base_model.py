@@ -8,6 +8,7 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+from sklearn.metrics import RocCurveDisplay, PrecisionRecallDisplay
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,22 @@ class BaseModel(ABC):
         # Default implementation: Create an empty file or log a message?
         # For now, just pass
         pass 
+
+    @abstractmethod
+    def plot_roc_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """
+        Plot ROC curve if the model supports it (typically classifiers).
+        Should handle scaling internally if necessary.
+        """
+        pass
+
+    @abstractmethod
+    def plot_precision_recall_curve(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str):
+        """
+        Plot Precision-Recall curve if the model supports it (typically classifiers).
+        Should handle scaling internally if necessary.
+        """
+        pass
 
     def plot_confusion_matrix(self, X_test: np.ndarray, y_test: np.ndarray, output_path: str, class_labels: Optional[List[str]] = None):
         """

@@ -236,7 +236,23 @@ def evaluate_models(trained_models: Dict[str, BaseModel], X_test: np.ndarray, y_
                     except Exception as plot_err:
                         logger.error(f"Failed to plot confusion matrix for {model_type}: {plot_err}")
 
-                # 4. Add other potential plots here (e.g., plot_clusters for KMeans)
+                # 4. Call ROC Curve plotting method
+                if output_dir and hasattr(model_instance, 'plot_roc_curve') and callable(getattr(model_instance, 'plot_roc_curve')):
+                    try:
+                        roc_plot_path = os.path.join(output_dir, f"{model_type}_roc_curve.png")
+                        model_instance.plot_roc_curve(X_test, y_test, roc_plot_path)
+                    except Exception as plot_err:
+                        logger.error(f"Failed to plot ROC curve for {model_type}: {plot_err}")
+                
+                # 5. Call Precision-Recall Curve plotting method
+                if output_dir and hasattr(model_instance, 'plot_precision_recall_curve') and callable(getattr(model_instance, 'plot_precision_recall_curve')):
+                    try:
+                        pr_plot_path = os.path.join(output_dir, f"{model_type}_precision_recall_curve.png")
+                        model_instance.plot_precision_recall_curve(X_test, y_test, pr_plot_path)
+                    except Exception as plot_err:
+                        logger.error(f"Failed to plot Precision-Recall curve for {model_type}: {plot_err}")
+
+                # 6. Add other potential plots here (e.g., plot_clusters for KMeans)
                 if output_dir and model_type == 'kmeans' and hasattr(model_instance, 'plot_clusters') and callable(getattr(model_instance, 'plot_clusters')):
                     try:
                         cluster_plot_path = os.path.join(output_dir, f"{model_type}_clusters.png")
