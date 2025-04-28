@@ -4,6 +4,8 @@ This project aims to detect Alzheimer's disease using MRI data.
 
 ## Project Structure
 
+The project is organized primarily by team member contributions.
+
 ```
 project_root/
 ├── data/
@@ -11,92 +13,24 @@ project_root/
 │   └── oasis-cross-sectional.csv # Metadata file
 ├── notebooks/        # Jupyter notebooks for exploration, visualization
 ├── outputs/          # Directory for pipeline outputs (models, results, plots)
-│   └── baseline_run_TIMESTAMP/
-│       ├── evaluation_metrics.json
-│       ├── *.png                   # Plots (Confusion Matrix, Feature Importance, etc.)
-│       ├── feature_importance.csv
-│       └── models/                 # Saved model artifacts
-│           └── *.pkl
-├── src/
-│   ├── features/       # Feature extraction (statistical, textural, etc.)
-│   │   ├── __init__.py
-│   │   ├── core.py
-│   │   ├── statistical.py
-│   │   └── ...
-│   ├── models/         # Model implementations
-│   │   ├── __init__.py
-│   │   ├── base_model.py # Abstract base class for models
-│   │   └── baseline/     # Baseline model implementations (LR, RF, KNN, etc.)
-│   │       ├── __init__.py
-│   │       ├── logistic_regression.py
-│   │       └── ...
-│   ├── pipelines/      # End-to-end pipelines
-│   │   ├── __init__.py
-│   │   ├── baseline_pipeline.py # Core logic for baseline runs
-│   │   └── run_baseline.py      # CLI script to execute the baseline pipeline
-│   └── utils/          # Utility functions (dataloader, preprocessing, helpers)
-│       ├── __init__.py
-│       ├── dataloader.py
-│       ├── preprocessing.py
-│       └── ...
-├── tests/            # Unit and integration tests
-├── requirements.txt  # Project dependencies
+│   └── ...           # Timestamped output directories from runs
+├── team_members/     # Code organized by team member
+│   └── miguel/       # Code developed by Miguel
+│       ├── src/        # Source code (pipelines, models, features)
+│       └── README.md # Details specific to Miguel's code
+├── tests/            # Unit and integration tests (if applicable per member)
+├── requirements.txt  # Project dependencies (consider member-specific if needed)
 └── README.md         # This file
 ```
 
-## Baseline Models Pipeline
+## Contributions
 
-The `src/pipelines/run_baseline.py` script provides a command-line interface to run baseline machine learning models for Alzheimer's detection based on extracted features.
+This section outlines the primary contributions of each team member. Refer to the individual `README.md` files within each `team_members/<name>/` directory for more specific details (if available).
 
-**Purpose:**
-These baseline models (Logistic Regression, Random Forest, KNN, K-Means) serve as a benchmark. They are trained on statistical and/or textural features extracted from MRI data. The methodology focuses on providing a consistent framework and results for comparison against more complex Deep Learning approaches.
+*   **Miguel de la Rocha:** Handled data loading and extraction for OASIS-1 dataset, MRI data preprocessing, and exploration. Implemented and analyzed traditional machine learning models (Logistic Regression, Random Forest, KNN, K-Means) via the baseline pipeline framework (`src/pipelines/run_baseline.py`). Contributed to the final report. See `team_members/miguel/` for detailed code and usage.
 
-**Features:**
-*   Modular design using a `BaseModel` interface (`src/models/base_model.py`).
-*   Configurable feature extraction (`statistical`, `textural`).
-*   Configurable model selection.
-*   Subject-aware data splitting (default) to prevent data leakage.
-*   Handles 3-class classification (non-demented=0, very mild=1, mild/moderate=2) by default.
-*   Option to run binary classification (non-demented=0, demented>=0.5 -> 1) using `--combine_cdr` flag.
-*   Generates evaluation metrics, confusion matrices, and feature importance plots.
+*   **Vetrivel Kanakasabai:** Explored MRI scan slices and handled MRI data preprocessing. Implemented, trained, and analyzed the ConvMixer deep learning model (`ConvMixer.ipynb`, `data_check.ipynb`). Contributed to the final report. See `team_members/vetrivel/`.
 
-**Usage:**
+*   **Lucy Mendez:** Focused on preprocessing, data augmentation, and exploration of MRI slices. Implemented, trained, and analyzed the EfficientNet deep learning model (`efficientnetv2_model_3classes.py`), including performance visualizations. Handled project team meeting logistics. Contributed to the final report. See `team_members/lucy/`.
 
-Navigate to the project root directory.
-
-*   **Run default 3-class classification with LR and RF using statistical features:**
-    ```bash
-    python -m src.pipelines.run_baseline --model_types logistic_regression random_forest --feature_types statistical
-    ```
-
-*   **Run all baseline classifiers (excluding SVM) for 3-class problem:**
-    ```bash
-    python -m src.pipelines.run_baseline --model_types logistic_regression random_forest knn kmeans --feature_types statistical 
-    ```
-
-*   **Run binary classification (Non-demented vs. Demented) using Random Forest:**
-    ```bash
-    python -m src.pipelines.run_baseline --model_types random_forest --feature_types statistical --combine_cdr
-    ```
-
-*   **Specify different parameters (e.g., test size, feature selection):**
-    ```bash
-    python -m src.pipelines.run_baseline --model_types knn --feature_types statistical --test_size 0.25 --n_features 30
-    ```
-
-See `python -m src.pipelines.run_baseline --help` for all available options.
-
-**Outputs:**
-Results are saved in a timestamped subdirectory within `outputs/`, e.g., `outputs/baseline_run_YYYYMMDD_HHMMSS/`.
-This includes:
-*   `evaluation_metrics.json`: Detailed performance metrics for each model.
-*   Confusion matrix plots (`*_confusion_matrix.png`).
-*   Feature importance plots (`*_feature_importance.png`).
-*   Overall selected feature importance (`feature_importance.csv`).
-*   Saved model artifacts (e.g., `*.pkl` files for trained models and scalers).
-
-## Next Steps
-
-*   Develop and integrate Deep Learning models.
-*   Compare DL model performance against these established baselines.
-*   Further explore feature engineering and data augmentation techniques.
+*   **Kaitlin Timmer:** Worked on visualization of MRI scans, data augmentation, and preprocessing via Otsu's method. Implemented, trained, and analyzed the ResNeXt deep learning model. Key code contributions include data handling (`data.py`, `data_exploration.py`). Contributed to the final report. See `team_members/kaitlin/`.
