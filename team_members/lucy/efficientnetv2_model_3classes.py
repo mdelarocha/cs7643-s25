@@ -25,6 +25,18 @@ from collections import Counter, defaultdict
 # Suppress nibabel warnings about affine/origin issues
 nib_log = logging.getLogger("nibabel")
 nib_log.setLevel(logging.ERROR)  #non-critical warnings
+import random
+# Force CuDNN to deterministic kernels
+#torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# Enforce deterministic algorithms globally (PyTorch ≥1.8)
+#torch.use_deterministic_algorithms(True)
+# Seed all RNGs
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
 
 # ----------------------------
 # GCSFS: Load subject from GCS with multiple fallback methods
@@ -283,8 +295,8 @@ class ProcessedOASISDataset(Dataset):
 
         # Step 2: Limit to mid-brain range 
         
-        mid_range_mask = (valid_indices >= 20) & (valid_indices <= 120) #when using anatomical weighting Test Accuracy: 58.33% #Test Macro F1 Score: 0.4862
-        #restricts selection to only the specified range (110 - 30 + 1 = 81 slices)
+        mid_range_mask = (valid_indices >= 20) & (valid_indices <= 120) #when using anatomical #Test Accuracy: 66.67% Test Macro F1 Score: 0.5234
+        #restricts selection to only the specified range (110 - 30 + 1 = 81 slices) 
         #mid_range_mask = (valid_indices >= 30) & (valid_indices <= 110) #Test Accuracy: 56.76% Test Macro F1 Score: 0.3798 (using 7 slices)
         #mid_range_mask = (valid_indices >= 32) & (valid_indices <= 115) #Test Accuracy: 40.54%
         #mid_range_mask = (valid_indices >= 40) & (valid_indices <= 100) #Test Accuracy: 16.22%
@@ -375,7 +387,7 @@ class ProcessedOASISDataset(Dataset):
         assert not torch.isnan(volume_data).any(), f"NaN in volume_data for subject {subject_id}"
         
         # Label conversion
-        label_to_index = {"nondemented": 0, "very mild dementia": 1, "mild dementia": 2, "moderate dementia": 2}
+        label_to_index = {"nondemented": 0, "very mild dementia": 1, "mild to moderate dementia": 2}
         label_index = label_to_index[class_label.lower()]
         
         return mri_slice, clinical_data, volume_data, label_index
@@ -680,45 +692,21 @@ def plot_training_curves(metrics):
     plt.savefig('training_curves.png')
     plt.show()
 
-# def plot_confusion_matrix(y_true, y_pred, class_names):
-#     """Plot confusion matrix with percentages"""
-#     cm = confusion_matrix(y_true, y_pred)
-#     plt.figure(figsize=(10, 8))
-#     cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-#     sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Blues', 
-#                 xticklabels=class_names, yticklabels=class_names)
-#     plt.ylabel('True Label')
-#     plt.xlabel('Predicted Label')
-#     plt.title('Normalized Confusion Matrix')
-#     plt.tight_layout()
-#     plt.savefig('confusion_matrix.png')
-#     plt.show()
-
 def plot_confusion_matrix(y_true, y_pred, class_names):
-    """Plot both normalized and raw count confusion matrices"""
+    """Plot confusion matrix with percentages"""
     cm = confusion_matrix(y_true, y_pred)
-    
-    # Create a figure with two subplots side by side
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-    
-    # Plot normalized confusion matrix (percentages)
+    plt.figure(figsize=(10, 8))
     cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Blues', 
-                xticklabels=class_names, yticklabels=class_names, ax=ax1)
-    ax1.set_ylabel('True Label')
-    ax1.set_xlabel('Predicted Label')
-    ax1.set_title('Normalized Confusion Matrix')
-    
-    # Plot raw count confusion matrix
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=class_names, yticklabels=class_names, ax=ax2)
-    ax2.set_ylabel('True Label')
-    ax2.set_xlabel('Predicted Label')
-    ax2.set_title('Count Confusion Matrix')
-    
+                xticklabels=class_names, yticklabels=class_names)
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.title('Normalized Confusion Matrix')
     plt.tight_layout()
     plt.savefig('confusion_matrix.png')
     plt.show()
+
+
 
 def plot_sensitivity_specificity(metrics, class_names):
     """Plot sensitivity and specificity trends per class"""
@@ -1266,8 +1254,7 @@ def get_sample_weights(dataset, train_dataset):
     label_to_index = {
         "nondemented": 0,
         "very mild dementia": 1,
-        "mild dementia": 2,
-        "moderate dementia": 2
+         "mild to moderate dementia": 2
     }
     y_train_numeric = [label_to_index[label] for label in y_train]
 
